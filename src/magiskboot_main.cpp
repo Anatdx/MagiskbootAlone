@@ -3,7 +3,8 @@
 
 #include "magiskboot.hpp"
 
-int main(int argc, char **argv) {
+// Entry point when linked into ksud (multi-call binary). Standalone build defines main() below.
+int magiskboot_main(int argc, char **argv) {
     if (argc < 3) {
         std::fprintf(stderr,
                      "Usage:\n"
@@ -53,4 +54,10 @@ int main(int argc, char **argv) {
         return 1;
     }
 }
+
+#if defined(MAGISKBOOT_STANDALONE)
+int main(int argc, char **argv) {
+    return magiskboot_main(argc, argv);
+}
+#endif
 

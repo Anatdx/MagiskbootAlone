@@ -27,6 +27,7 @@ add_executable(magiskboot
   src/magiskboot_main.cpp
 )
 
+target_compile_definitions(magiskboot PRIVATE MAGISKBOOT_STANDALONE=1)
 target_include_directories(magiskboot PRIVATE
   src
 )
