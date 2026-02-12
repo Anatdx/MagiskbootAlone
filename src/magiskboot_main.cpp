@@ -55,7 +55,8 @@ int magiskboot_main(int argc, char **argv) {
     }
 }
 
-#if defined(MAGISKBOOT_STANDALONE)
+// Only define main when building this repo as standalone; when embedded (e.g. in ksud), embedder sets MAGISKBOOT_ALONE_AVAILABLE.
+#if defined(MAGISKBOOT_STANDALONE) && !defined(MAGISKBOOT_ALONE_AVAILABLE)
 int main(int argc, char **argv) {
     return magiskboot_main(argc, argv);
 }
