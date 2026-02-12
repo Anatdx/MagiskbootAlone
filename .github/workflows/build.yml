@@ -1,0 +1,79 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps (Ubuntu)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zlib1g-dev libssl-dev
+
+      - name: Configure
+        run: cmake -S . -B build -DMAGISKBOOT_USE_OPENSSL=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Upload artifact (Linux)
+        uses: actions/upload-artifact@v4
+        with:
+          name: magiskboot-linux
+          path: build/magiskboot
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DMAGISKBOOT_USE_OPENSSL=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Upload artifact (macOS)
+        uses: actions/upload-artifact@v4
+        with:
+          name: magiskboot-macos
+          path: build/magiskboot
+
+  build-android:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a, x86_64, x86]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+          add-to-path: true
+
+      - name: Configure (Android ${{ matrix.abi }})
+        run: |
+          cmake -S . -B build_android_${{ matrix.abi }} \
+            -DCMAKE_TOOLCHAIN_FILE=${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=${{ matrix.abi }} \
+            -DANDROID_PLATFORM=android-21 \
+            -DMAGISKBOOT_USE_OPENSSL=OFF
+
+      - name: Build
+        run: cmake --build build_android_${{ matrix.abi }}
+
+      - name: Upload artifact (Android ${{ matrix.abi }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: magiskboot-android-${{ matrix.abi }}
+          path: build_android_${{ matrix.abi }}/magiskboot
