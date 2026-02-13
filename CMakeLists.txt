@@ -7,14 +7,22 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(MAGISKBOOT_USE_OPENSSL "Use OpenSSL for SHA1/SHA256" ON)
 
-include(FetchContent)
-FetchContent_Declare(
-  lz4
-  GIT_REPOSITORY https://github.com/lz4/lz4.git
-  GIT_TAG v1.10.0
-  GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(lz4)
+# Prefer vendored LZ4 (from Magisk) in external/lz4 for same ABI as Magisk magiskboot
+set(LZ4_VENDORED "${CMAKE_CURRENT_SOURCE_DIR}/external/lz4")
+if(EXISTS "${LZ4_VENDORED}/lz4.c")
+  set(LZ4_LIB_DIR "${LZ4_VENDORED}")
+  message(STATUS "magiskboot: using vendored LZ4 (external/lz4)")
+else()
+  include(FetchContent)
+  FetchContent_Declare(
+    lz4
+    GIT_REPOSITORY https://github.com/lz4/lz4.git
+    GIT_TAG v1.10.0
+    GIT_SHALLOW TRUE
+  )
+  FetchContent_MakeAvailable(lz4)
+  set(LZ4_LIB_DIR ${lz4_SOURCE_DIR}/lib)
+endif()
 
 # Host (Linux/macOS/Windows): find zlib and optional OpenSSL.
 # Android (NDK): use NDK sysroot zlib; OpenSSL typically OFF unless you provide a prebuilt.
@@ -35,16 +43,16 @@ add_executable(magiskboot
   src/boot_crypto.cpp
   src/cpio.cpp
   src/magiskboot_main.cpp
-  ${lz4_SOURCE_DIR}/lib/lz4.c
-  ${lz4_SOURCE_DIR}/lib/lz4frame.c
-  ${lz4_SOURCE_DIR}/lib/lz4hc.c
-  ${lz4_SOURCE_DIR}/lib/xxhash.c
+  ${LZ4_LIB_DIR}/lz4.c
+  ${LZ4_LIB_DIR}/lz4frame.c
+  ${LZ4_LIB_DIR}/lz4hc.c
+  ${LZ4_LIB_DIR}/xxhash.c
 )
 
 target_compile_definitions(magiskboot PRIVATE MAGISKBOOT_STANDALONE=1)
 target_include_directories(magiskboot PRIVATE
   src
-  ${lz4_SOURCE_DIR}/lib
+  ${LZ4_LIB_DIR}
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Android")

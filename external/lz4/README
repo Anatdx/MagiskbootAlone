@@ -1,0 +1,4 @@
+# LZ4 library (vendored from Magisk)
+
+Source: Magisk `native/src/external/lz4/lib/`
+Used for boot image ramdisk LZ4_LEGACY decompression. Same ABI/behavior as Magisk magiskboot.
