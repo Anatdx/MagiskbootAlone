@@ -1,11 +1,20 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(magiskboot_alone LANGUAGES CXX)
+project(magiskboot_alone LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(MAGISKBOOT_USE_OPENSSL "Use OpenSSL for SHA1/SHA256" ON)
+
+include(FetchContent)
+FetchContent_Declare(
+  lz4
+  GIT_REPOSITORY https://github.com/lz4/lz4.git
+  GIT_TAG v1.10.0
+  GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(lz4)
 
 # Host (Linux/macOS/Windows): find zlib and optional OpenSSL.
 # Android (NDK): use NDK sysroot zlib; OpenSSL typically OFF unless you provide a prebuilt.
@@ -26,11 +35,16 @@ add_executable(magiskboot
   src/boot_crypto.cpp
   src/cpio.cpp
   src/magiskboot_main.cpp
+  ${lz4_SOURCE_DIR}/lib/lz4.c
+  ${lz4_SOURCE_DIR}/lib/lz4frame.c
+  ${lz4_SOURCE_DIR}/lib/lz4hc.c
+  ${lz4_SOURCE_DIR}/lib/xxhash.c
 )
 
 target_compile_definitions(magiskboot PRIVATE MAGISKBOOT_STANDALONE=1)
 target_include_directories(magiskboot PRIVATE
   src
+  ${lz4_SOURCE_DIR}/lib
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Android")

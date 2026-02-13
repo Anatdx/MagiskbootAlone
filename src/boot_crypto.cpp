@@ -1,8 +1,12 @@
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 #include <zlib.h>
+#include <lz4.h>
+#include <lz4frame.h>
 #ifdef USE_OPENSSL_SHA
 #include <openssl/sha.h>
 #endif
@@ -99,10 +103,115 @@ void sha256_hash(byte_view data, byte_data out) {
 
 namespace {
 
+constexpr unsigned char LZ4_LEGACY_MAGIC[] = {0x02, 0x21, 0x4c, 0x18};
+constexpr std::size_t LZ4_LEGACY_MAGIC_SIZE = sizeof(LZ4_LEGACY_MAGIC);
+constexpr std::size_t LZ4_LEGACY_BLOCK_LIMIT = 8 * 1024 * 1024;
+constexpr std::size_t LZ4_LEGACY_COMPRESS_BLOCK = 64 * 1024;
+
 [[noreturn]] void unsupported_format(const char *op, FileFormat fmt) {
     LOGE("magiskboot: %s for format [%s] is not implemented in standalone C++ port\n",
          op, fmt2name(fmt));
     std::exit(1);
+}
+
+std::uint32_t read_le32(const std::uint8_t *p) {
+    return static_cast<std::uint32_t>(p[0]) |
+           (static_cast<std::uint32_t>(p[1]) << 8) |
+           (static_cast<std::uint32_t>(p[2]) << 16) |
+           (static_cast<std::uint32_t>(p[3]) << 24);
+}
+
+void lz4f_compress(byte_view in, int out_fd) {
+    std::size_t bound = LZ4F_compressFrameBound(in.size(), nullptr);
+    std::vector<char> buf(bound);
+    std::size_t n = LZ4F_compressFrame(buf.data(), bound, in.data(), in.size(), nullptr);
+    if (LZ4F_isError(n)) {
+        LOGE("LZ4F_compressFrame failed: %s\n", LZ4F_getErrorName(n));
+        throw std::runtime_error("LZ4 frame compress failed");
+    }
+    if (xwrite(out_fd, buf.data(), n) < 0) {
+        throw std::runtime_error("write failed");
+    }
+}
+
+void lz4f_decompress(byte_view in, int out_fd) {
+    LZ4F_dctx *dctx = nullptr;
+    if (LZ4F_createDecompressionContext(&dctx, LZ4F_VERSION) != 0) {
+        throw std::runtime_error("LZ4 frame init failed");
+    }
+    std::array<char, 64 * 1024> out_buf{};
+    std::size_t src_pos = 0;
+    while (src_pos < in.size()) {
+        std::size_t src_len = in.size() - src_pos;
+        std::size_t dst_len = out_buf.size();
+        std::size_t n = LZ4F_decompress(dctx, out_buf.data(), &dst_len,
+                                        in.data() + src_pos, &src_len, nullptr);
+        if (LZ4F_isError(n)) {
+            LZ4F_freeDecompressionContext(dctx);
+            throw std::runtime_error("LZ4 frame decompress failed");
+        }
+        src_pos += src_len;
+        if (dst_len > 0 && xwrite(out_fd, out_buf.data(), dst_len) < 0) {
+            LZ4F_freeDecompressionContext(dctx);
+            throw std::runtime_error("write failed");
+        }
+        if (n == 0) {
+            break;
+        }
+    }
+    LZ4F_freeDecompressionContext(dctx);
+}
+
+void lz4_legacy_compress(byte_view in, int out_fd) {
+    xwrite(out_fd, LZ4_LEGACY_MAGIC, LZ4_LEGACY_MAGIC_SIZE);
+    std::vector<char> c_buf(static_cast<std::size_t>(
+        LZ4_compressBound(static_cast<int>(LZ4_LEGACY_COMPRESS_BLOCK))));
+    const char *src = reinterpret_cast<const char *>(in.data());
+    std::size_t remaining = in.size();
+    while (remaining > 0) {
+        int chunk = static_cast<int>(std::min<std::size_t>(remaining, LZ4_LEGACY_COMPRESS_BLOCK));
+        int c_sz = LZ4_compress_default(src, c_buf.data(), chunk, static_cast<int>(c_buf.size()));
+        if (c_sz <= 0) {
+            throw std::runtime_error("LZ4 legacy compress failed");
+        }
+        std::uint32_t le = static_cast<std::uint32_t>(c_sz);
+        xwrite(out_fd, &le, 4);
+        xwrite(out_fd, c_buf.data(), c_sz);
+        src += chunk;
+        remaining -= static_cast<std::size_t>(chunk);
+    }
+}
+
+void lz4_legacy_decompress(byte_view in, int out_fd) {
+    if (in.size() < LZ4_LEGACY_MAGIC_SIZE + 4) {
+        throw std::runtime_error("LZ4 legacy stream too short");
+    }
+    if (std::memcmp(in.data(), LZ4_LEGACY_MAGIC, LZ4_LEGACY_MAGIC_SIZE) != 0) {
+        throw std::runtime_error("LZ4 legacy bad magic");
+    }
+
+    std::size_t off = LZ4_LEGACY_MAGIC_SIZE;
+    while (off + 4 <= in.size()) {
+        std::uint32_t comp_sz = read_le32(in.data() + off);
+        off += 4;
+        if (comp_sz == 0) {
+            break;
+        }
+        if (off + comp_sz > in.size()) {
+            throw std::runtime_error("LZ4 legacy block overrun");
+        }
+        std::vector<char> out_buf(LZ4_LEGACY_BLOCK_LIMIT);
+        int out_sz = LZ4_decompress_safe(reinterpret_cast<const char *>(in.data() + off),
+                                         out_buf.data(), static_cast<int>(comp_sz),
+                                         static_cast<int>(out_buf.size()));
+        if (out_sz < 0) {
+            throw std::runtime_error("LZ4 legacy decompress failed");
+        }
+        if (out_sz > 0 && xwrite(out_fd, out_buf.data(), static_cast<std::size_t>(out_sz)) < 0) {
+            throw std::runtime_error("write failed");
+        }
+        off += comp_sz;
+    }
 }
 
 void zlib_deflate_gzip(byte_view in, int out_fd, int level) {
@@ -171,6 +280,13 @@ void compress_bytes(FileFormat format, byte_view in_bytes, int out_fd) {
                               format == FileFormat::ZOPFLI ? Z_BEST_COMPRESSION
                                                            : Z_DEFAULT_COMPRESSION);
             break;
+        case FileFormat::LZ4:
+            lz4f_compress(in_bytes, out_fd);
+            break;
+        case FileFormat::LZ4_LEGACY:
+        case FileFormat::LZ4_LG:
+            lz4_legacy_compress(in_bytes, out_fd);
+            break;
         default:
             unsupported_format("compress", format);
     }
@@ -181,6 +297,13 @@ void decompress_bytes(FileFormat format, byte_view in_bytes, int out_fd) {
         case FileFormat::GZIP:
         case FileFormat::ZOPFLI:
             zlib_inflate_gzip(in_bytes, out_fd);
+            break;
+        case FileFormat::LZ4:
+            lz4f_decompress(in_bytes, out_fd);
+            break;
+        case FileFormat::LZ4_LEGACY:
+        case FileFormat::LZ4_LG:
+            lz4_legacy_decompress(in_bytes, out_fd);
             break;
         default:
             unsupported_format("decompress", format);
