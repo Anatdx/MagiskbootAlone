@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <utility>
 #include <bitset>
-#include <span>
 #include <memory>
 
 #include "base_host.hpp"
@@ -431,6 +430,16 @@ enum {
 };
 
 struct boot_img {
+    struct vendor_ramdisk_table_view {
+        const vendor_ramdisk_table_entry_v4 *ptr = nullptr;
+        std::size_t count = 0;
+
+        const vendor_ramdisk_table_entry_v4 *begin() const { return ptr; }
+        const vendor_ramdisk_table_entry_v4 *end() const { return ptr + count; }
+        std::size_t size() const { return count; }
+        bool empty() const { return count == 0; }
+    };
+
     const mmap_data map;
     dyn_img_hdr *hdr = nullptr;
     std::bitset<BOOT_FLAGS_MAX> flags;
@@ -471,7 +480,7 @@ struct boot_img {
     bool parse_image(const uint8_t *addr, FileFormat type);
     void parse_zimage();
     const uint8_t *parse_hdr(const uint8_t *addr, FileFormat type);
-    std::span<const vendor_ramdisk_table_entry_v4> vendor_ramdisk_tbl() const;
+    vendor_ramdisk_table_view vendor_ramdisk_tbl() const;
 
     // AVB1 verify stub: upstream implements in Rust; we return false (no AVB1 detection)
     bool verify() const noexcept { return false; }

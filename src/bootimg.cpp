@@ -1,7 +1,5 @@
-#include <bit>
 #include <functional>
 #include <memory>
-#include <span>
 #include <string_view>
 
 #include "base_host.hpp"
@@ -173,7 +171,7 @@ void dyn_img_hdr::dump_hdr_file() const {
 }
 
 void dyn_img_hdr::load_hdr_file() {
-    parse_prop_file(HEADER_FILE, [=, this](string_view key, string_view value) -> bool {
+    parse_prop_file(HEADER_FILE, [this](string_view key, string_view value) -> bool {
         if (key == "name" && name()) {
             memset(name(), 0, 16);
             memcpy(name(), value.data(), value.size() > 15 ? 15 : value.size());
@@ -248,12 +246,10 @@ struct __attribute__((packed)) fdt_header {
         uint32_t byte3: 8;
 
         constexpr operator uint32_t() const {
-            return bit_cast<uint32_t>(fdt32_t{
-                .byte0 = byte3,
-                .byte1 = byte2,
-                .byte2 = byte1,
-                .byte3 = byte0
-            });
+            return (static_cast<uint32_t>(byte3) << 24) |
+                   (static_cast<uint32_t>(byte2) << 16) |
+                   (static_cast<uint32_t>(byte1) << 8) |
+                   static_cast<uint32_t>(byte0);
         }
     };
 
@@ -444,7 +440,7 @@ static const char *vendor_ramdisk_type(int type) {
     }
 }
 
-std::span<const vendor_ramdisk_table_entry_v4> boot_img::vendor_ramdisk_tbl() const {
+boot_img::vendor_ramdisk_table_view boot_img::vendor_ramdisk_tbl() const {
     if (hdr->vendor_ramdisk_table_size() == 0) {
         return {};
     }
@@ -456,8 +452,10 @@ std::span<const vendor_ramdisk_table_entry_v4> boot_img::vendor_ramdisk_tbl() co
                 sizeof(table_entry));
         exit(RETURN_ERROR);
     }
-    return span(reinterpret_cast<table_entry *>(const_cast<uint8_t *>(vendor_ramdisk_table)),
-                hdr->vendor_ramdisk_table_entry_num());
+    return {
+        reinterpret_cast<table_entry *>(const_cast<uint8_t *>(vendor_ramdisk_table)),
+        static_cast<std::size_t>(hdr->vendor_ramdisk_table_entry_num()),
+    };
 }
 
 #define assert_off() \
