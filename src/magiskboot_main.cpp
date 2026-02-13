@@ -29,14 +29,14 @@ int magiskboot_main(int argc, char **argv) {
             }
             return unpack(img, skip_decomp, hdr);
         } else if (cmd == "repack") {
-            if (argc < 4) {
-                std::fprintf(stderr, "repack needs <in-boot.img> <out-boot.img>\n");
+            if (argc < 3) {
+                std::fprintf(stderr, "repack needs <in-boot.img> [out-boot.img]\n");
                 return 1;
             }
             const char *src = argv[2];
-            const char *dst = argv[3];
+            const char *dst = (argc >= 4) ? argv[3] : NEW_BOOT;
             bool skip_comp = false;
-            for (int i = 4; i < argc; ++i) {
+            for (int i = 3; i < argc; ++i) {
                 if (std::string(argv[i]) == "--skip-comp") skip_comp = true;
             }
             repack(src, dst, skip_comp);
