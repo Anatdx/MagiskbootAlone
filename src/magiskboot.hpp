@@ -2,10 +2,31 @@
 
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 #include "base_host.hpp"
 #include "boot_crypto.hpp"
-#include "bootimg.hpp"
+
+// Utf8CStr for internal magiskboot APIs (matches Magisk's Utf8CStr)
+using Utf8CStr = std::string;
+
+// Internal APIs (implemented in bootimg.cpp)
+int unpack(Utf8CStr image, bool skip_decomp = false, bool hdr = false);
+void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp = false);
+int split_image_dtb(Utf8CStr filename, bool skip_decomp = false);
+void cleanup();
+FileFormat check_fmt(const void *buf, size_t len);
+
+// Public APIs (wrappers in bootimg.cpp)
+inline int unpack(const char *image, bool skip_decomp = false, bool hdr = false) {
+    return unpack(Utf8CStr(image), skip_decomp, hdr);
+}
+inline void repack(const char *src_img, const char *out_img, bool skip_comp = false) {
+    repack(Utf8CStr(src_img), Utf8CStr(out_img), skip_comp);
+}
+inline int split_image_dtb(const char *filename, bool skip_decomp = false) {
+    return split_image_dtb(Utf8CStr(filename), skip_decomp);
+}
 
 #define HEADER_FILE     "header"
 #define KERNEL_FILE     "kernel"
@@ -20,7 +41,7 @@
 #define NEW_BOOT        "new-boot.img"
 
 #define BUFFER_MATCH(buf, s) (std::memcmp(buf, s, sizeof(s) - 1) == 0)
-#define BUFFER_CONTAIN(buf, sz, s) (std::memmem(buf, sz, s, sizeof(s) - 1) != nullptr)
+#define BUFFER_CONTAIN(buf, sz, s) (::memmem(buf, sz, s, sizeof(s) - 1) != nullptr)
 #define CHECKED_MATCH(s) (len >= (sizeof(s) - 1) && BUFFER_MATCH(buf, s))
 
 #define BOOT_MAGIC      "ANDROID!"
@@ -53,10 +74,3 @@
 #define AVB_FOOTER_MAGIC "AVBf"
 #define AVB_MAGIC "AVB0"
 #define ZIMAGE_MAGIC "\x18\x28\x6f\x01"
-
-int unpack(const char *image, bool skip_decomp = false, bool hdr = false);
-void repack(const char *src_img, const char *out_img, bool skip_comp = false);
-int split_image_dtb(const char *filename, bool skip_decomp = false);
-void cleanup();
-FileFormat check_fmt(const void *buf, size_t len);
-
