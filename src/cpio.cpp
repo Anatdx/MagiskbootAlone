@@ -65,7 +65,9 @@ bool write_all(int fd, const void* data, std::size_t len) {
 }
 
 void format_hex8(char* out, std::uint32_t v) {
-    std::snprintf(out, 9, "%08x", v);
+    char tmp[9] = {};
+    std::snprintf(tmp, sizeof(tmp), "%08x", v);
+    std::memcpy(out, tmp, 8);
 }
 
 bool write_entry(int fd, std::uint32_t ino, const std::string& name, const CpioEntry& entry) {
