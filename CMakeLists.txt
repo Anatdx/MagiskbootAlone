@@ -24,6 +24,7 @@ add_executable(magiskboot
   src/base_host.cpp
   src/bootimg.cpp
   src/boot_crypto.cpp
+  src/cpio.cpp
   src/magiskboot_main.cpp
 )
 

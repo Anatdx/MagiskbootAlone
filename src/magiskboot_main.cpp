@@ -1,6 +1,8 @@
 #include <cstdio>
 #include <string>
+#include <vector>
 
+#include "cpio.hpp"
 #include "magiskboot.hpp"
 
 // Entry point when linked into ksud (multi-call binary). Standalone build defines main() below.
@@ -10,7 +12,8 @@ int magiskboot_main(int argc, char **argv) {
                      "Usage:\n"
                      "  magiskboot unpack <boot.img> [--skip-decomp] [--hdr]\n"
                      "  magiskboot repack <in-boot.img> <out-boot.img> [--skip-comp]\n"
-                     "  magiskboot split-dtb <kernel-or-boot.img> [--skip-decomp]\n");
+                     "  magiskboot split-dtb <kernel-or-boot.img> [--skip-decomp]\n"
+                     "  magiskboot cpio <ramdisk.cpio> <command> [command...]\n");
         return 1;
     }
 
@@ -45,6 +48,16 @@ int magiskboot_main(int argc, char **argv) {
                 if (std::string(argv[i]) == "--skip-decomp") skip_decomp = true;
             }
             return split_image_dtb(img, skip_decomp);
+        } else if (cmd == "cpio") {
+            if (argc < 4) {
+                std::fprintf(stderr, "cpio needs <ramdisk.cpio> <command> [command...]\n");
+                return 1;
+            }
+            std::vector<std::string> commands;
+            for (int i = 3; i < argc; ++i) {
+                commands.emplace_back(argv[i]);
+            }
+            return cpio_commands(argv[2], commands);
         } else {
             std::fprintf(stderr, "Unknown command: %s\n", cmd.c_str());
             return 1;
