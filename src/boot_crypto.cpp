@@ -107,6 +107,7 @@ constexpr unsigned char LZ4_LEGACY_MAGIC[] = {0x02, 0x21, 0x4c, 0x18};
 constexpr std::size_t LZ4_LEGACY_MAGIC_SIZE = sizeof(LZ4_LEGACY_MAGIC);
 constexpr std::size_t LZ4_LEGACY_BLOCK_LIMIT = 8 * 1024 * 1024;
 constexpr std::size_t LZ4_LEGACY_COMPRESS_BLOCK = 64 * 1024;
+constexpr std::uint32_t LZ4_LEGACY_UNCOMPRESSED_FLAG = 0x80000000u;
 
 [[noreturn]] void unsupported_format(const char *op, FileFormat fmt) {
     LOGE("magiskboot: %s for format [%s] is not implemented in standalone C++ port\n",
@@ -192,25 +193,36 @@ void lz4_legacy_decompress(byte_view in, int out_fd) {
 
     std::size_t off = LZ4_LEGACY_MAGIC_SIZE;
     while (off + 4 <= in.size()) {
-        std::uint32_t comp_sz = read_le32(in.data() + off);
+        std::uint32_t block_hdr = read_le32(in.data() + off);
         off += 4;
-        if (comp_sz == 0) {
+        if (block_hdr == 0) {
             break;
         }
-        if (off + comp_sz > in.size()) {
+        bool is_uncompressed = (block_hdr & LZ4_LEGACY_UNCOMPRESSED_FLAG) != 0;
+        std::uint32_t block_sz = block_hdr & ~LZ4_LEGACY_UNCOMPRESSED_FLAG;
+        if (block_sz == 0) {
+            break;
+        }
+        if (off + block_sz > in.size()) {
             throw std::runtime_error("LZ4 legacy block overrun");
         }
-        std::vector<char> out_buf(LZ4_LEGACY_BLOCK_LIMIT);
-        int out_sz = LZ4_decompress_safe(reinterpret_cast<const char *>(in.data() + off),
-                                         out_buf.data(), static_cast<int>(comp_sz),
-                                         static_cast<int>(out_buf.size()));
-        if (out_sz < 0) {
-            throw std::runtime_error("LZ4 legacy decompress failed");
+        if (is_uncompressed) {
+            if (xwrite(out_fd, in.data() + off, block_sz) < 0) {
+                throw std::runtime_error("write failed");
+            }
+        } else {
+            std::vector<char> out_buf(LZ4_LEGACY_BLOCK_LIMIT);
+            int out_sz = LZ4_decompress_safe(reinterpret_cast<const char *>(in.data() + off),
+                                             out_buf.data(), static_cast<int>(block_sz),
+                                             static_cast<int>(out_buf.size()));
+            if (out_sz < 0) {
+                throw std::runtime_error("LZ4 legacy decompress failed");
+            }
+            if (out_sz > 0 && xwrite(out_fd, out_buf.data(), static_cast<std::size_t>(out_sz)) < 0) {
+                throw std::runtime_error("write failed");
+            }
         }
-        if (out_sz > 0 && xwrite(out_fd, out_buf.data(), static_cast<std::size_t>(out_sz)) < 0) {
-            throw std::runtime_error("write failed");
-        }
-        off += comp_sz;
+        off += block_sz;
     }
 }
 
