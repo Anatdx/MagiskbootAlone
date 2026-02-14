@@ -57,6 +57,11 @@ target_include_directories(magiskboot PRIVATE
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Android")
   target_link_libraries(magiskboot PRIVATE z)
+  # Force LZ4 to use memcpy for unaligned access (LZ4_FORCE_MEMORY_ACCESS=0). On Android/ARM,
+  # the default LZ4_FORCE_MEMORY_ACCESS 1 can generate code that triggers alignment faults (SIGSEGV)
+  # on some devices; official Magisk may avoid this via different toolchain/crates. See
+  # external/lz4/lz4.c tuning parameters.
+  target_compile_definitions(magiskboot PRIVATE LZ4_FORCE_MEMORY_ACCESS=0)
 else()
   target_link_libraries(magiskboot PRIVATE ZLIB::ZLIB)
 endif()
