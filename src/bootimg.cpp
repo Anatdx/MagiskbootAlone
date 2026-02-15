@@ -574,11 +574,16 @@ bool boot_img::parse_image(const uint8_t *addr, FileFormat type) {
         const void *footer = tail.data() + tail.size() - sizeof(AvbFooter);
         if (BUFFER_MATCH(footer, AVB_FOOTER_MAGIC)) {
             avb_footer = static_cast<const AvbFooter *>(footer);
-            const void *meta = payload.data() + __builtin_bswap64(avb_footer->vbmeta_offset);
-            if (BUFFER_MATCH(meta, AVB_MAGIC)) {
-                fprintf(stderr, "VBMETA\n");
-                flags[AVB_FLAG] = true;
-                vbmeta = static_cast<const AvbVBMetaImageHeader *>(meta);
+            uint64_t vbmeta_off = __builtin_bswap64(avb_footer->vbmeta_offset);
+            uint64_t vbmeta_sz = __builtin_bswap64(avb_footer->vbmeta_size);
+            if (vbmeta_off <= map.size() && vbmeta_sz <= map.size() &&
+                vbmeta_off + vbmeta_sz <= map.size()) {
+                const void *meta = map.data() + static_cast<size_t>(vbmeta_off);
+                if (BUFFER_MATCH(meta, AVB_MAGIC)) {
+                    fprintf(stderr, "VBMETA\n");
+                    flags[AVB_FLAG] = true;
+                    vbmeta = static_cast<const AvbVBMetaImageHeader *>(meta);
+                }
             }
         }
     }
@@ -888,8 +893,19 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     if (boot.flags[AVB_FLAG]) {
         file_align_with(4096);
         off.vbmeta = lseek(fd, 0, SEEK_CUR);
+        uint64_t vbmeta_off = __builtin_bswap64(boot.avb_footer->vbmeta_offset);
         uint64_t vbmeta_size = __builtin_bswap64(boot.avb_footer->vbmeta_size);
-        xwrite(fd, boot.vbmeta, vbmeta_size);
+        if (vbmeta_off > boot.map.size() || vbmeta_size > boot.map.size() ||
+            vbmeta_off + vbmeta_size > boot.map.size()) {
+            fprintf(stderr, "repack: vbmeta source out of bounds (off=%llu sz=%llu map=%zu)\n",
+                    static_cast<unsigned long long>(vbmeta_off),
+                    static_cast<unsigned long long>(vbmeta_size), boot.map.size());
+            delete hdr;
+            close(fd);
+            return;
+        }
+        xwrite(fd, boot.map.data() + static_cast<size_t>(vbmeta_off),
+               static_cast<size_t>(vbmeta_size));
     }
 
     if (!boot.flags[CHROMEOS_FLAG]) {
