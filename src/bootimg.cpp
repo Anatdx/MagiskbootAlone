@@ -883,7 +883,27 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     uint32_t aosp_img_size = off.tail - off.header;
 
-    mmap_data out(fd, lseek(fd, 0, SEEK_END), true);
+    off_t file_sz = lseek(fd, 0, SEEK_END);
+    if (file_sz <= 0) {
+        fprintf(stderr, "repack: output file size invalid (%lld)\n", static_cast<long long>(file_sz));
+        delete hdr;
+        close(fd);
+        return;
+    }
+    if (static_cast<unsigned long long>(file_sz) > SIZE_MAX) {
+        fprintf(stderr, "repack: output file size overflow\n");
+        delete hdr;
+        close(fd);
+        return;
+    }
+    size_t out_sz = static_cast<size_t>(file_sz);
+    mmap_data out(fd, out_sz, true);
+    if (!out.data() || out.size() == 0) {
+        fprintf(stderr, "repack: mmap output image failed\n");
+        delete hdr;
+        close(fd);
+        return;
+    }
 
     if (boot.flags[MTK_KERNEL]) {
         auto m_hdr = reinterpret_cast<mtk_hdr *>(out.data() + off.kernel);
@@ -900,29 +920,38 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     if (char *id = hdr->id()) {
         auto ctx = get_sha(!boot.flags[SHA256_FLAG]);
+        auto safe_view = [&out](uint32_t off_val, uint32_t len) -> byte_view {
+            if (len == 0) return byte_view(out.data(), 0);
+            if (off_val > out.size() || len > out.size() - off_val)
+                return byte_view(out.data(), 0);
+            return byte_view(out.data() + off_val, len);
+        };
         uint32_t size = hdr->kernel_size();
-        ctx->update(byte_view(out.data() + off.kernel, size));
+        ctx->update(safe_view(off.kernel, size));
         ctx->update(byte_view(&size, sizeof(size)));
         size = hdr->ramdisk_size();
-        ctx->update(byte_view(out.data() + off.ramdisk, size));
+        ctx->update(safe_view(off.ramdisk, size));
         ctx->update(byte_view(&size, sizeof(size)));
         size = hdr->second_size();
-        ctx->update(byte_view(out.data() + off.second, size));
+        ctx->update(safe_view(off.second, size));
         ctx->update(byte_view(&size, sizeof(size)));
         size = hdr->extra_size();
         if (size) {
-            ctx->update(byte_view(out.data() + off.extra, size));
+            ctx->update(safe_view(off.extra, size));
             ctx->update(byte_view(&size, sizeof(size)));
         }
         uint32_t ver = hdr->header_version();
         if (ver == 1 || ver == 2) {
             size = hdr->recovery_dtbo_size();
-            ctx->update(byte_view(out.data() + hdr->recovery_dtbo_offset(), size));
+            uint64_t ro_off = hdr->recovery_dtbo_offset();
+            ctx->update(ro_off <= out.size() && size <= out.size() - ro_off
+                            ? byte_view(out.data() + ro_off, size)
+                            : byte_view(out.data(), 0));
             ctx->update(byte_view(&size, sizeof(size)));
         }
         if (ver == 2) {
             size = hdr->dtb_size();
-            ctx->update(byte_view(out.data() + off.dtb, size));
+            ctx->update(safe_view(off.dtb, size));
             ctx->update(byte_view(&size, sizeof(size)));
         }
         memset(id, 0, BOOT_ID_SIZE);
@@ -931,14 +960,32 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     hdr->print();
 
-    if (boot.flags[AMONET_FLAG]) {
-        auto real_hdr_sz = min(hdr->hdr_space() - AMONET_MICROLOADER_SZ, hdr->hdr_size());
-        memcpy(out.data() + off.header + AMONET_MICROLOADER_SZ, hdr->raw_hdr(), real_hdr_sz);
-    } else {
-        memcpy(out.data() + off.header, hdr->raw_hdr(), hdr->hdr_size());
+    const size_t hdr_copy_sz = boot.flags[AMONET_FLAG]
+                                  ? min(hdr->hdr_space() - AMONET_MICROLOADER_SZ, hdr->hdr_size())
+                                  : hdr->hdr_size();
+    const size_t hdr_off = boot.flags[AMONET_FLAG] ? off.header + AMONET_MICROLOADER_SZ : off.header;
+    if (hdr_off + hdr_copy_sz > out.size() || !hdr->raw_hdr()) {
+        fprintf(stderr, "repack: header write out of bounds\n");
+        delete hdr;
+        close(fd);
+        return;
     }
+    memcpy(out.data() + hdr_off, hdr->raw_hdr(), hdr_copy_sz);
 
     if (boot.flags[AVB_FLAG]) {
+        if (out.size() < sizeof(AvbFooter)) {
+            fprintf(stderr, "repack: image too small for AVB footer\n");
+            delete hdr;
+            close(fd);
+            return;
+        }
+        uint64_t vbmeta_size = __builtin_bswap64(boot.avb_footer->vbmeta_size);
+        if (off.vbmeta + vbmeta_size > out.size()) {
+            fprintf(stderr, "repack: vbmeta region out of bounds\n");
+            delete hdr;
+            close(fd);
+            return;
+        }
         auto footer = reinterpret_cast<AvbFooter *>(out.data() + out.size() - sizeof(AvbFooter));
         memcpy(footer, boot.avb_footer, sizeof(AvbFooter));
         footer->original_image_size = __builtin_bswap64(aosp_img_size);
