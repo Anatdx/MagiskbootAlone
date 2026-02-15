@@ -95,11 +95,14 @@ bool write_entry(int fd, std::string_view entry_name, std::uint32_t ino, const C
     if (!write_all(fd, entry_name.data(), entry_name.size()) || !write_all(fd, "\0", 1)) {
         return false;
     }
-    const std::uint32_t name_pad = align4(static_cast<std::uint32_t>(entry_name.size() + 1)) -
-                                   static_cast<std::uint32_t>(entry_name.size() + 1);
-    if (name_pad != 0) {
+    /* Pad so next header is at align_4(sizeof(NewcHeader) + namesize), matching load(). */
+    const std::uint32_t namesize = static_cast<std::uint32_t>(entry_name.size() + 1);
+    const std::uint32_t pos_after_name = sizeof(NewcHeader) + namesize;
+    const std::uint32_t next_aligned = (pos_after_name + 3) & ~3U;
+    const std::uint32_t name_pad_len = next_aligned - pos_after_name;
+    if (name_pad_len != 0) {
         const std::array<std::uint8_t, 3> zeros = {0, 0, 0};
-        if (!write_all(fd, zeros.data(), name_pad)) {
+        if (!write_all(fd, zeros.data(), name_pad_len)) {
             return false;
         }
     }
@@ -207,8 +210,9 @@ bool CpioArchive::load(const std::string& path) {
             return false;
         }
         std::string name(reinterpret_cast<const char*>(p + off), namesize > 0 ? namesize - 1 : 0);
+        /* newc: pathname is namesize bytes, then NUL padding to 4-byte boundary (pos = align_4(pos)). */
         off += static_cast<std::size_t>(namesize);
-        off = (off + 3) & ~static_cast<std::size_t>(3); /* align_4(pos) like Magisk */
+        off = (off + 3) & ~static_cast<std::size_t>(3);
 
         if (name == "." || name == "..") {
             continue;
