@@ -185,6 +185,8 @@ void lz4_legacy_compress(byte_view in, int out_fd) {
 // LZ4 legacy (block format: magic + [4-byte comp_sz LE][block]...) — match Magisk native
 // On 32-bit, (off + comp_sz) can overflow; validate comp_sz against remaining bytes first.
 constexpr std::size_t LZ4_LEGACY_COMP_BLOCK_MAX = 16 * 1024 * 1024;  // 16MB max compressed block
+// Cap total decompressed size to avoid corrupt/malicious stream filling disk (e.g. many small blocks).
+constexpr std::size_t LZ4_LEGACY_DECOMP_TOTAL_MAX = 256 * 1024 * 1024;  // 256MB
 
 void lz4_legacy_decompress(byte_view in, int out_fd) {
     if (in.size() <= LZ4_LEGACY_MAGIC_SIZE + 4) {
@@ -197,6 +199,7 @@ void lz4_legacy_decompress(byte_view in, int out_fd) {
     }
     std::vector<char> out_buf(LZ4_LEGACY_BLOCK_MAX);
     std::size_t off = LZ4_LEGACY_MAGIC_SIZE;
+    std::size_t total_out = 0;
     while (off + 4 <= in.size()) {
         std::uint32_t comp_sz;
         std::memcpy(&comp_sz, in.data() + off, 4);
@@ -219,7 +222,14 @@ void lz4_legacy_decompress(byte_view in, int out_fd) {
             LOGE("magiskboot: LZ4_decompress_safe failed: %d\n", n);
             throw std::runtime_error("LZ4 legacy decompress failed");
         }
-        xwrite(out_fd, out_buf.data(), static_cast<size_t>(n));
+        const std::size_t n_u = static_cast<std::size_t>(n);
+        if (total_out + n_u > LZ4_LEGACY_DECOMP_TOTAL_MAX) {
+            LOGE("magiskboot: LZ4 legacy total decompressed size exceeds %zu\n",
+                 LZ4_LEGACY_DECOMP_TOTAL_MAX);
+            throw std::runtime_error("LZ4 legacy decompress output too large");
+        }
+        total_out += n_u;
+        xwrite(out_fd, out_buf.data(), n_u);
         off += comp_sz;
     }
 }
