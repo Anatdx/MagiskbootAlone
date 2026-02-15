@@ -16,20 +16,20 @@
 namespace {
 
 struct NewcHeader {
-    char magic[6];
-    char ino[8];
-    char mode[8];
-    char uid[8];
-    char gid[8];
-    char nlink[8];
-    char mtime[8];
-    char filesize[8];
-    char devmajor[8];
-    char devminor[8];
-    char rdevmajor[8];
-    char rdevminor[8];
-    char namesize[8];
-    char check[8];
+    std::array<char, 6> magic;
+    std::array<char, 8> ino;
+    std::array<char, 8> mode;
+    std::array<char, 8> uid;
+    std::array<char, 8> gid;
+    std::array<char, 8> nlink;
+    std::array<char, 8> mtime;
+    std::array<char, 8> filesize;
+    std::array<char, 8> devmajor;
+    std::array<char, 8> devminor;
+    std::array<char, 8> rdevmajor;
+    std::array<char, 8> rdevminor;
+    std::array<char, 8> namesize;
+    std::array<char, 8> check;
 };
 
 static_assert(sizeof(NewcHeader) == 110, "invalid newc header size");
@@ -37,11 +37,11 @@ static_assert(sizeof(NewcHeader) == 110, "invalid newc header size");
 constexpr const char* kTrailer = "TRAILER!!!";
 
 std::uint32_t parse_hex8(const char* s) {
-    char buf[9] = {};
-    std::memcpy(buf, s, 8);
+    std::array<char, 9> buf = {};
+    std::memcpy(buf.data(), s, 8);
     char* end = nullptr;
-    unsigned long v = std::strtoul(buf, &end, 16);
-    if (end == buf) {
+    unsigned long v = std::strtoul(buf.data(), &end, 16);
+    if (end == buf.data()) {
         return 0;
     }
     return static_cast<std::uint32_t>(v);
@@ -55,7 +55,7 @@ bool write_all(int fd, const void* data, std::size_t len) {
     const auto* p = static_cast<const std::uint8_t*>(data);
     std::size_t done = 0;
     while (done < len) {
-        ssize_t n = ::write(fd, p + done, len - done);
+        const ssize_t n = ::write(fd, p + done, len - done);
         if (n <= 0) {
             return false;
         }
@@ -65,36 +65,38 @@ bool write_all(int fd, const void* data, std::size_t len) {
 }
 
 void format_hex8(char* out, std::uint32_t v) {
-    char tmp[9] = {};
-    std::snprintf(tmp, sizeof(tmp), "%08x", v);
-    std::memcpy(out, tmp, 8);
+    std::array<char, 9> tmp = {};
+    const int ret = std::snprintf(tmp.data(), tmp.size(), "%08x", v);
+    if (ret >= 0 && static_cast<std::size_t>(ret) >= 8) {
+        std::memcpy(out, tmp.data(), 8);
+    }
 }
 
-bool write_entry(int fd, std::uint32_t ino, const std::string& name, const CpioEntry& entry) {
+bool write_entry(int fd, std::string_view entry_name, std::uint32_t ino, const CpioEntry& entry) {
     NewcHeader h{};
-    std::memcpy(h.magic, "070701", 6);
-    format_hex8(h.ino, ino);
-    format_hex8(h.mode, entry.mode);
-    format_hex8(h.uid, entry.uid);
-    format_hex8(h.gid, entry.gid);
-    format_hex8(h.nlink, (entry.mode & S_IFMT) == S_IFDIR ? 2U : 1U);
-    format_hex8(h.mtime, 0);
-    format_hex8(h.filesize, static_cast<std::uint32_t>(entry.data.size()));
-    format_hex8(h.devmajor, 0);
-    format_hex8(h.devminor, 0);
-    format_hex8(h.rdevmajor, entry.rdev_major);
-    format_hex8(h.rdevminor, entry.rdev_minor);
-    format_hex8(h.namesize, static_cast<std::uint32_t>(name.size() + 1));
-    format_hex8(h.check, 0);
+    std::memcpy(h.magic.data(), "070701", 6);
+    format_hex8(h.ino.data(), ino);
+    format_hex8(h.mode.data(), entry.mode);
+    format_hex8(h.uid.data(), entry.uid);
+    format_hex8(h.gid.data(), entry.gid);
+    format_hex8(h.nlink.data(), (entry.mode & S_IFMT) == S_IFDIR ? 2U : 1U);
+    format_hex8(h.mtime.data(), 0);
+    format_hex8(h.filesize.data(), static_cast<std::uint32_t>(entry.data.size()));
+    format_hex8(h.devmajor.data(), 0);
+    format_hex8(h.devminor.data(), 0);
+    format_hex8(h.rdevmajor.data(), entry.rdev_major);
+    format_hex8(h.rdevminor.data(), entry.rdev_minor);
+    format_hex8(h.namesize.data(), static_cast<std::uint32_t>(entry_name.size() + 1));
+    format_hex8(h.check.data(), 0);
 
     if (!write_all(fd, &h, sizeof(h))) {
         return false;
     }
-    if (!write_all(fd, name.c_str(), name.size() + 1)) {
+    if (!write_all(fd, entry_name.data(), entry_name.size()) || !write_all(fd, "\0", 1)) {
         return false;
     }
-    const std::uint32_t name_pad = align4(static_cast<std::uint32_t>(name.size() + 1)) -
-                                   static_cast<std::uint32_t>(name.size() + 1);
+    const std::uint32_t name_pad = align4(static_cast<std::uint32_t>(entry_name.size() + 1)) -
+                                   static_cast<std::uint32_t>(entry_name.size() + 1);
     if (name_pad != 0) {
         const std::array<std::uint8_t, 3> zeros = {0, 0, 0};
         if (!write_all(fd, zeros.data(), name_pad)) {
@@ -177,50 +179,80 @@ bool CpioArchive::load(const std::string& path) {
     std::size_t off = 0;
     const std::size_t total = data.size();
 
+    static constexpr std::array<char, 7> kNewcMagic = {"070701"};
+
+    /* Match Magisk native/src/boot/cpio.rs load_from_data() exactly */
     while (off + sizeof(NewcHeader) <= total) {
         const auto* h = reinterpret_cast<const NewcHeader*>(p + off);
-        if (std::memcmp(h->magic, "070701", 6) != 0) {
-            LOGE("Invalid cpio magic at offset %zu\n", off);
-            return false;
+        if (std::memcmp(h->magic.data(), kNewcMagic.data(), 6) != 0) {
+            /* Magisk after TRAILER!!! uses find("070701"); here we search to skip padding/garbage */
+            const std::size_t search_start = off;
+            const std::size_t search_max = total >= 6 ? total - 6 : 0;
+            bool found = false;
+            for (std::size_t i = search_start; i <= search_max; ++i) {
+                if (std::memcmp(p + i, kNewcMagic.data(), 6) == 0) {
+                    off = i;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                LOGE("Invalid cpio magic at offset %zu\n", search_start);
+                return false;
+            }
+            continue;
         }
 
-        const std::uint32_t mode = parse_hex8(h->mode);
-        const std::uint32_t uid = parse_hex8(h->uid);
-        const std::uint32_t gid = parse_hex8(h->gid);
-        const std::uint32_t filesize = parse_hex8(h->filesize);
-        const std::uint32_t rdev_major = parse_hex8(h->rdevmajor);
-        const std::uint32_t rdev_minor = parse_hex8(h->rdevminor);
-        const std::uint32_t namesize = parse_hex8(h->namesize);
-
         off += sizeof(NewcHeader);
+        const std::uint32_t namesize = parse_hex8(h->namesize.data());
         if (namesize == 0 || off + namesize > total) {
             LOGE("Invalid cpio namesize\n");
             return false;
         }
-
         std::string name(reinterpret_cast<const char*>(p + off), namesize > 0 ? namesize - 1 : 0);
         off += static_cast<std::size_t>(namesize);
-        off = (off + 3) & ~static_cast<std::size_t>(3); /* newc: pathname then padding to 4-byte */
+        off = (off + 3) & ~static_cast<std::size_t>(3); /* align_4(pos) like Magisk */
+
+        if (name == "." || name == "..") {
+            continue;
+        }
+        if (name == kTrailer) {
+            /* Magisk: data[pos..].find(b"070701") => pos += x or break */
+            const std::size_t search_max = total >= 6 ? total - 6 : 0;
+            bool found = false;
+            for (std::size_t i = off; i <= search_max; ++i) {
+                if (std::memcmp(p + i, kNewcMagic.data(), 6) == 0) {
+                    off = i;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                break;
+            }
+            continue;
+        }
+
+        const std::uint32_t mode = parse_hex8(h->mode.data());
+        const std::uint32_t uid = parse_hex8(h->uid.data());
+        const std::uint32_t gid = parse_hex8(h->gid.data());
+        const std::uint32_t filesize = parse_hex8(h->filesize.data());
+        const std::uint32_t rdev_major = parse_hex8(h->rdevmajor.data());
+        const std::uint32_t rdev_minor = parse_hex8(h->rdevminor.data());
         if (off + filesize > total) {
             LOGE("Invalid cpio filesize\n");
             return false;
         }
-
-        if (name == kTrailer) {
-            break;
-        }
-        if (!name.empty() && name != "." && name != "..") {
-            CpioEntry entry;
-            entry.mode = mode;
-            entry.uid = uid;
-            entry.gid = gid;
-            entry.rdev_major = rdev_major;
-            entry.rdev_minor = rdev_minor;
-            entry.data.assign(p + off, p + off + filesize);
-            entries_[normalize_path(name)] = std::move(entry);
-        }
-
-        off += align4(filesize);
+        CpioEntry entry;
+        entry.mode = mode;
+        entry.uid = uid;
+        entry.gid = gid;
+        entry.rdev_major = rdev_major;
+        entry.rdev_minor = rdev_minor;
+        entry.data.assign(p + off, p + off + filesize);
+        entries_[normalize_path(name)] = std::move(entry);
+        off += static_cast<std::size_t>(filesize);
+        off = (off + 3) & ~static_cast<std::size_t>(3); /* align_4(pos) like Magisk */
     }
 
     return true;
@@ -235,7 +267,7 @@ bool CpioArchive::dump(const std::string& path) const {
 
     std::uint32_t ino = 1;
     for (const auto& [name, entry] : entries_) {
-        if (!write_entry(fd, ino++, name, entry)) {
+        if (!write_entry(fd, name, ino++, entry)) {
             PLOGE("write cpio entry");
             return false;
         }
@@ -243,7 +275,7 @@ bool CpioArchive::dump(const std::string& path) const {
 
     CpioEntry trailer;
     trailer.mode = S_IFREG;
-    if (!write_entry(fd, ino, kTrailer, trailer)) {
+    if (!write_entry(fd, kTrailer, ino, trailer)) {
         PLOGE("write cpio trailer");
         return false;
     }
@@ -265,7 +297,7 @@ int CpioArchive::test() const {
     return 0;
 }
 
-bool CpioArchive::add(std::uint32_t mode, const std::string& path, const std::string& src_file) {
+bool CpioArchive::add(std::uint32_t mode, std::string_view cpio_path, const std::string& src_file) {
     std::ifstream ifs(src_file, std::ios::binary);
     if (!ifs) {
         PLOGE("open source file %s", src_file.c_str());
@@ -278,7 +310,7 @@ bool CpioArchive::add(std::uint32_t mode, const std::string& path, const std::st
     entry.uid = 0;
     entry.gid = 0;
     entry.data = std::move(data);
-    entries_[normalize_path(path)] = std::move(entry);
+    entries_[normalize_path(std::string(cpio_path))] = std::move(entry);
     return true;
 }
 

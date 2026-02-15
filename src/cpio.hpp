@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 struct CpioEntry {
@@ -17,12 +18,12 @@ struct CpioEntry {
 class CpioArchive {
 public:
     bool load(const std::string& path);
-    bool dump(const std::string& path) const;
+    [[nodiscard]] bool dump(const std::string& path) const;
 
-    bool exists(const std::string& path) const;
-    int test() const;
+    [[nodiscard]] bool exists(const std::string& path) const;
+    [[nodiscard]] int test() const;
 
-    bool add(std::uint32_t mode, const std::string& path, const std::string& src_file);
+    bool add(std::uint32_t mode, std::string_view cpio_path, const std::string& src_file);
     bool mkdir(std::uint32_t mode, const std::string& path);
     bool rm(const std::string& path);
     bool mv(const std::string& from, const std::string& to);
