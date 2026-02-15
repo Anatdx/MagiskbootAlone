@@ -182,7 +182,10 @@ void lz4_legacy_compress(byte_view in, int out_fd) {
     }
 }
 
-// LZ4 legacy (block format: magic + [4-byte comp_sz][block]...) — match Magisk native/src/boot/boot_crypto.cpp
+// LZ4 legacy (block format: magic + [4-byte comp_sz LE][block]...) — match Magisk native
+// On 32-bit, (off + comp_sz) can overflow; validate comp_sz against remaining bytes first.
+constexpr std::size_t LZ4_LEGACY_COMP_BLOCK_MAX = 16 * 1024 * 1024;  // 16MB max compressed block
+
 void lz4_legacy_decompress(byte_view in, int out_fd) {
     if (in.size() <= LZ4_LEGACY_MAGIC_SIZE + 4) {
         LOGE("magiskboot: LZ4 legacy stream too short\n");
@@ -193,16 +196,21 @@ void lz4_legacy_decompress(byte_view in, int out_fd) {
         throw std::runtime_error("LZ4 legacy bad magic");
     }
     std::vector<char> out_buf(LZ4_LEGACY_BLOCK_MAX);
-    size_t off = LZ4_LEGACY_MAGIC_SIZE;
+    std::size_t off = LZ4_LEGACY_MAGIC_SIZE;
     while (off + 4 <= in.size()) {
-        uint32_t comp_sz;
+        std::uint32_t comp_sz;
         std::memcpy(&comp_sz, in.data() + off, 4);
         off += 4;
         if (comp_sz == 0)
             break;
-        if (off + comp_sz > in.size()) {
-            LOGE("magiskboot: LZ4 legacy block overrun\n");
+        const std::size_t block_avail = in.size() - off;  /* bytes left for compressed block */
+        if (comp_sz > block_avail) {
+            LOGE("magiskboot: LZ4 legacy block overrun (comp_sz %u > %zu)\n", comp_sz, block_avail);
             throw std::runtime_error("LZ4 legacy block overrun");
+        }
+        if (comp_sz > LZ4_LEGACY_COMP_BLOCK_MAX) {
+            LOGE("magiskboot: LZ4 legacy block too large: %u\n", comp_sz);
+            throw std::runtime_error("LZ4 legacy block too large");
         }
         int n = LZ4_decompress_safe(reinterpret_cast<const char *>(in.data()) + off,
                                     out_buf.data(), static_cast<int>(comp_sz),
@@ -211,7 +219,7 @@ void lz4_legacy_decompress(byte_view in, int out_fd) {
             LOGE("magiskboot: LZ4_decompress_safe failed: %d\n", n);
             throw std::runtime_error("LZ4 legacy decompress failed");
         }
-        xwrite(out_fd, out_buf.data(), n);
+        xwrite(out_fd, out_buf.data(), static_cast<size_t>(n));
         off += comp_sz;
     }
 }

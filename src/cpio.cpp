@@ -182,21 +182,36 @@ bool CpioArchive::load(const std::string& path) {
     std::size_t off = 0;
     const std::size_t total = data.size();
 
+    /* Reject LZ4 legacy ramdisk (unpack with --skip-decomp). Otherwise we might find "070701"
+     * by chance in the stream and parse garbage as cpio → huge memory/cache and hang. */
+    static constexpr unsigned char kLz4LegacyMagic[] = {0x02, 0x21, 0x4c, 0x18};
+    if (total >= 4 && std::memcmp(p, kLz4LegacyMagic, 4) == 0) {
+        LOGE("Input is LZ4 compressed ramdisk, not cpio; decompress ramdisk first\n");
+        return false;
+    }
+
     static constexpr std::array<char, 7> kNewcMagic = {"070701"};
 
     /* Match Magisk native/src/boot/cpio.rs load_from_data() exactly */
     while (off + sizeof(NewcHeader) <= total) {
         const auto* h = reinterpret_cast<const NewcHeader*>(p + off);
         if (std::memcmp(h->magic.data(), kNewcMagic.data(), 6) != 0) {
-            /* Only at start: skip leading garbage (some images have padding before first header). Match Rust behavior: search all. */
+            /* Only at start: skip leading padding (some images have a few bytes before first header).
+             * Search only the first 512 bytes. If we searched the whole file, non-cpio data (e.g. LZ4
+             * ramdisk when unpack used --skip-decomp) would often contain "070701" by chance; we would
+             * then parse garbage as cpio entries (huge namesize/filesize), causing huge memory and
+             * disk use and apparent hang. Limiting to 512 bytes gives a clean "Invalid cpio magic"
+             * failure for non-cpio input while still allowing real cpio with leading padding. */
+            constexpr std::size_t kInitialSearchLimit = 512;
             bool found = false;
             if (off == 0 && total >= 6) {
-                const std::size_t search_limit = total - 6;
+                const std::size_t search_limit =
+                    (total - 6 <= kInitialSearchLimit) ? (total - 6) : kInitialSearchLimit;
                 for (std::size_t i = 0; i <= search_limit; ++i) {
                     if (std::memcmp(p + i, kNewcMagic.data(), 6) == 0) {
                         off = i;
                         found = true;
-                        break; /* retry with off at first 070701 */
+                        break;
                     }
                 }
             }
