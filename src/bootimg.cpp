@@ -890,29 +890,41 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
         close(fd);
         return;
     }
-    if (static_cast<unsigned long long>(file_sz) > SIZE_MAX) {
-        fprintf(stderr, "repack: output file size overflow\n");
-        delete hdr;
-        close(fd);
-        return;
-    }
-    size_t out_sz = static_cast<size_t>(file_sz);
-    mmap_data out(fd, out_sz, true);
-    if (!out.data() || out.size() == 0) {
-        fprintf(stderr, "repack: mmap output image failed\n");
-        delete hdr;
-        close(fd);
-        return;
-    }
+    const size_t out_sz = static_cast<size_t>(file_sz);
 
+    // Patch image using pread/pwrite only (no mmap) to avoid SIGSEGV on some devices (e.g. v4 + AVB).
     if (boot.flags[MTK_KERNEL]) {
-        auto m_hdr = reinterpret_cast<mtk_hdr *>(out.data() + off.kernel);
-        m_hdr->size = hdr->kernel_size();
+        mtk_hdr m_hdr;
+        if (pread(fd, &m_hdr, sizeof(m_hdr), off.kernel) != static_cast<ssize_t>(sizeof(m_hdr))) {
+            fprintf(stderr, "repack: MTK kernel header read failed\n");
+            delete hdr;
+            close(fd);
+            return;
+        }
+        m_hdr.size = hdr->kernel_size();
+        if (pwrite(fd, &m_hdr, sizeof(m_hdr), off.kernel) != static_cast<ssize_t>(sizeof(m_hdr))) {
+            fprintf(stderr, "repack: MTK kernel header write failed\n");
+            delete hdr;
+            close(fd);
+            return;
+        }
         hdr->set_kernel_size(hdr->kernel_size() + sizeof(mtk_hdr));
     }
     if (boot.flags[MTK_RAMDISK]) {
-        auto m_hdr = reinterpret_cast<mtk_hdr *>(out.data() + off.ramdisk);
-        m_hdr->size = hdr->ramdisk_size();
+        mtk_hdr m_hdr;
+        if (pread(fd, &m_hdr, sizeof(m_hdr), off.ramdisk) != static_cast<ssize_t>(sizeof(m_hdr))) {
+            fprintf(stderr, "repack: MTK ramdisk header read failed\n");
+            delete hdr;
+            close(fd);
+            return;
+        }
+        m_hdr.size = hdr->ramdisk_size();
+        if (pwrite(fd, &m_hdr, sizeof(m_hdr), off.ramdisk) != static_cast<ssize_t>(sizeof(m_hdr))) {
+            fprintf(stderr, "repack: MTK ramdisk header write failed\n");
+            delete hdr;
+            close(fd);
+            return;
+        }
         hdr->set_ramdisk_size(hdr->ramdisk_size() + sizeof(mtk_hdr));
     }
 
@@ -920,38 +932,39 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     if (char *id = hdr->id()) {
         auto ctx = get_sha(!boot.flags[SHA256_FLAG]);
-        auto safe_view = [&out](uint32_t off_val, uint32_t len) -> byte_view {
-            if (len == 0) return byte_view(out.data(), 0);
-            if (off_val > out.size() || len > out.size() - off_val)
-                return byte_view(out.data(), 0);
-            return byte_view(out.data() + off_val, len);
+        std::vector<char> buf;
+        auto read_update = [fd, &buf](uint32_t off_val, uint32_t len) -> byte_view {
+            if (len == 0) return byte_view(nullptr, 0);
+            buf.resize(len);
+            if (pread(fd, buf.data(), len, off_val) != static_cast<ssize_t>(len))
+                return byte_view(nullptr, 0);
+            return byte_view(buf.data(), len);
         };
         uint32_t size = hdr->kernel_size();
-        ctx->update(safe_view(off.kernel, size));
+        ctx->update(read_update(off.kernel, size));
         ctx->update(byte_view(&size, sizeof(size)));
         size = hdr->ramdisk_size();
-        ctx->update(safe_view(off.ramdisk, size));
+        ctx->update(read_update(off.ramdisk, size));
         ctx->update(byte_view(&size, sizeof(size)));
         size = hdr->second_size();
-        ctx->update(safe_view(off.second, size));
+        ctx->update(read_update(off.second, size));
         ctx->update(byte_view(&size, sizeof(size)));
         size = hdr->extra_size();
         if (size) {
-            ctx->update(safe_view(off.extra, size));
+            ctx->update(read_update(off.extra, size));
             ctx->update(byte_view(&size, sizeof(size)));
         }
         uint32_t ver = hdr->header_version();
         if (ver == 1 || ver == 2) {
             size = hdr->recovery_dtbo_size();
             uint64_t ro_off = hdr->recovery_dtbo_offset();
-            ctx->update(ro_off <= out.size() && size <= out.size() - ro_off
-                            ? byte_view(out.data() + ro_off, size)
-                            : byte_view(out.data(), 0));
+            if (ro_off <= out_sz && size <= out_sz - static_cast<size_t>(ro_off))
+                ctx->update(read_update(static_cast<uint32_t>(ro_off), size));
             ctx->update(byte_view(&size, sizeof(size)));
         }
         if (ver == 2) {
             size = hdr->dtb_size();
-            ctx->update(safe_view(off.dtb, size));
+            ctx->update(read_update(off.dtb, size));
             ctx->update(byte_view(&size, sizeof(size)));
         }
         memset(id, 0, BOOT_ID_SIZE);
@@ -964,54 +977,78 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
                                   ? min(hdr->hdr_space() - AMONET_MICROLOADER_SZ, hdr->hdr_size())
                                   : hdr->hdr_size();
     const size_t hdr_off = boot.flags[AMONET_FLAG] ? off.header + AMONET_MICROLOADER_SZ : off.header;
-    if (hdr_off + hdr_copy_sz > out.size() || !hdr->raw_hdr()) {
+    if (hdr_off + hdr_copy_sz > out_sz || !hdr->raw_hdr()) {
         fprintf(stderr, "repack: header write out of bounds\n");
         delete hdr;
         close(fd);
         return;
     }
-    memcpy(out.data() + hdr_off, hdr->raw_hdr(), hdr_copy_sz);
+    if (pwrite(fd, hdr->raw_hdr(), hdr_copy_sz, hdr_off) != static_cast<ssize_t>(hdr_copy_sz)) {
+        fprintf(stderr, "repack: header write failed\n");
+        delete hdr;
+        close(fd);
+        return;
+    }
 
     if (boot.flags[AVB_FLAG]) {
-        if (out.size() < sizeof(AvbFooter)) {
+        if (out_sz < sizeof(AvbFooter)) {
             fprintf(stderr, "repack: image too small for AVB footer\n");
             delete hdr;
             close(fd);
             return;
         }
-        uint64_t vbmeta_size = __builtin_bswap64(boot.avb_footer->vbmeta_size);
-        if (off.vbmeta + vbmeta_size > out.size()) {
-            fprintf(stderr, "repack: vbmeta region out of bounds\n");
+        AvbFooter footer;
+        memcpy(&footer, boot.avb_footer, sizeof(footer));
+        footer.original_image_size = __builtin_bswap64(aosp_img_size);
+        footer.vbmeta_offset = __builtin_bswap64(off.vbmeta);
+        if (pwrite(fd, &footer, sizeof(footer),
+                   static_cast<off_t>(out_sz - sizeof(AvbFooter))) !=
+            static_cast<ssize_t>(sizeof(footer))) {
+            fprintf(stderr, "repack: AVB footer write failed\n");
             delete hdr;
             close(fd);
             return;
         }
-        auto footer = reinterpret_cast<AvbFooter *>(out.data() + out.size() - sizeof(AvbFooter));
-        memcpy(footer, boot.avb_footer, sizeof(AvbFooter));
-        footer->original_image_size = __builtin_bswap64(aosp_img_size);
-        footer->vbmeta_offset = __builtin_bswap64(off.vbmeta);
         if (check_env("PATCHVBMETAFLAG")) {
-            auto vbmeta = reinterpret_cast<AvbVBMetaImageHeader *>(out.data() + off.vbmeta);
-            vbmeta->flags = __builtin_bswap32(3);
+            AvbVBMetaImageHeader vbmeta;
+            if (pread(fd, &vbmeta, sizeof(vbmeta), off.vbmeta) == static_cast<ssize_t>(sizeof(vbmeta))) {
+                vbmeta.flags = __builtin_bswap32(3);
+                pwrite(fd, &vbmeta, sizeof(vbmeta), off.vbmeta);
+            }
         }
     }
 
     if (boot.flags[DHTB_FLAG]) {
-        auto d_hdr = reinterpret_cast<dhtb_hdr *>(out.data());
-        d_hdr->size = aosp_img_size + 16 + 4;
-        sha256_hash(byte_view(out.data() + sizeof(dhtb_hdr), d_hdr->size),
-                    byte_data(d_hdr->checksum.data(), SHA256_DIGEST_SIZE));
+        std::vector<char> dhtb_payload(aosp_img_size + 16 + 4);
+        ssize_t nr = pread(fd, dhtb_payload.data(), dhtb_payload.size(),
+                           static_cast<off_t>(sizeof(dhtb_hdr)));
+        if (nr == static_cast<ssize_t>(dhtb_payload.size())) {
+            dhtb_hdr d_hdr;
+            memcpy(&d_hdr, boot.map.data(), sizeof(d_hdr));
+            d_hdr.size = aosp_img_size + 16 + 4;
+            sha256_hash(byte_view(dhtb_payload.data(), d_hdr.size),
+                        byte_data(d_hdr.checksum.data(), SHA256_DIGEST_SIZE));
+            if (pwrite(fd, &d_hdr, sizeof(d_hdr), 0) != static_cast<ssize_t>(sizeof(d_hdr))) {
+                fprintf(stderr, "repack: DHTB header write failed\n");
+            }
+        }
     } else if (boot.flags[BLOB_FLAG]) {
-        auto b_hdr = reinterpret_cast<blob_hdr *>(out.data());
-        b_hdr->size = aosp_img_size;
+        blob_hdr b_hdr;
+        if (pread(fd, &b_hdr, sizeof(b_hdr), 0) == static_cast<ssize_t>(sizeof(b_hdr))) {
+            b_hdr.size = aosp_img_size;
+            pwrite(fd, &b_hdr, sizeof(b_hdr), 0);
+        }
     }
 
     if (boot.flags[AVB1_SIGNED_FLAG]) {
-        byte_view payload(out.data() + off.header, aosp_img_size);
-        auto sig = sign_payload(payload);
-        if (!sig.empty()) {
-            lseek(fd, off.tail, SEEK_SET);
-            xwrite(fd, sig.data(), sig.size());
+        std::vector<char> payload_buf(aosp_img_size);
+        if (pread(fd, payload_buf.data(), payload_buf.size(), off.header) ==
+            static_cast<ssize_t>(payload_buf.size())) {
+            auto sig = sign_payload(byte_view(payload_buf.data(), payload_buf.size()));
+            if (!sig.empty()) {
+                lseek(fd, off.tail, SEEK_SET);
+                xwrite(fd, sig.data(), sig.size());
+            }
         }
     }
 
