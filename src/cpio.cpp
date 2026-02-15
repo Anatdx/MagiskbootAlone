@@ -185,22 +185,19 @@ bool CpioArchive::load(const std::string& path) {
     while (off + sizeof(NewcHeader) <= total) {
         const auto* h = reinterpret_cast<const NewcHeader*>(p + off);
         if (std::memcmp(h->magic.data(), kNewcMagic.data(), 6) != 0) {
-            /* Magisk after TRAILER!!! uses find("070701"); here we search to skip padding/garbage */
-            const std::size_t search_start = off;
-            const std::size_t search_max = total >= 6 ? total - 6 : 0;
-            bool found = false;
-            for (std::size_t i = search_start; i <= search_max; ++i) {
-                if (std::memcmp(p + i, kNewcMagic.data(), 6) == 0) {
-                    off = i;
-                    found = true;
-                    break;
+            /* Only at start: skip leading garbage (some images have padding before first header). Limit 512 to avoid hang. */
+            constexpr std::size_t kInitialSearchLimit = 512;
+            if (off == 0 && total >= 6) {
+                const std::size_t search_limit = (total - 6 <= kInitialSearchLimit) ? (total - 6) : kInitialSearchLimit;
+                for (std::size_t i = 0; i <= search_limit; ++i) {
+                    if (std::memcmp(p + i, kNewcMagic.data(), 6) == 0) {
+                        off = i;
+                        continue; /* retry with off at first 070701 */
+                    }
                 }
             }
-            if (!found) {
-                LOGE("Invalid cpio magic at offset %zu\n", search_start);
-                return false;
-            }
-            continue;
+            LOGE("Invalid cpio magic at offset %zu\n", off);
+            return false;
         }
 
         off += sizeof(NewcHeader);
