@@ -834,6 +834,8 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
         file_align();
     }
 
+    fprintf(stderr, "repack: after ramdisk align\n");
+    fflush(stderr);
     off.second = lseek(fd, 0, SEEK_CUR);
     if (access(SECOND_FILE, R_OK) == 0) {
         hdr->set_second_size(restore(fd, SECOND_FILE));
@@ -890,6 +892,8 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     off.tail = lseek(fd, 0, SEEK_CUR);
     file_align();
 
+    fprintf(stderr, "repack: before avb\n");
+    fflush(stderr);
     if (boot.flags[AVB_FLAG]) {
         file_align_with(4096);
         off.vbmeta = lseek(fd, 0, SEEK_CUR);
@@ -904,6 +908,8 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
             close(fd);
             return;
         }
+        fprintf(stderr, "repack: writing vbmeta\n");
+        fflush(stderr);
         xwrite(fd, boot.map.data() + static_cast<size_t>(vbmeta_off),
                static_cast<size_t>(vbmeta_size));
     }
