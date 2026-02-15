@@ -182,36 +182,36 @@ void lz4_legacy_compress(byte_view in, int out_fd) {
     }
 }
 
-// LZ4 legacy (block format: magic + [4-byte comp_sz LE][block]...) — match Magisk native/src/boot/boot_crypto.cpp
+// LZ4 legacy (block format: magic + [4-byte comp_sz][block]...) — match Magisk native/src/boot/boot_crypto.cpp
 void lz4_legacy_decompress(byte_view in, int out_fd) {
     if (in.size() <= LZ4_LEGACY_MAGIC_SIZE + 4) {
-        throw std::runtime_error("LZ4 legacy stream too short");
+        LOGE("magiskboot: LZ4 legacy stream too short\n");
+        throw std::runtime_error("LZ4 legacy too short");
     }
     if (std::memcmp(in.data(), LZ4_LEGACY_MAGIC, LZ4_LEGACY_MAGIC_SIZE) != 0) {
+        LOGE("magiskboot: LZ4 legacy bad magic\n");
         throw std::runtime_error("LZ4 legacy bad magic");
     }
-
     std::vector<char> out_buf(LZ4_LEGACY_BLOCK_MAX);
-    std::size_t off = LZ4_LEGACY_MAGIC_SIZE;
+    size_t off = LZ4_LEGACY_MAGIC_SIZE;
     while (off + 4 <= in.size()) {
-        std::uint32_t comp_sz;
+        uint32_t comp_sz;
         std::memcpy(&comp_sz, in.data() + off, 4);
         off += 4;
-        if (comp_sz == 0) {
+        if (comp_sz == 0)
             break;
-        }
         if (off + comp_sz > in.size()) {
+            LOGE("magiskboot: LZ4 legacy block overrun\n");
             throw std::runtime_error("LZ4 legacy block overrun");
         }
-        int n = LZ4_decompress_safe(reinterpret_cast<const char *>(in.data() + off),
-                                   out_buf.data(), static_cast<int>(comp_sz),
-                                   static_cast<int>(out_buf.size()));
+        int n = LZ4_decompress_safe(reinterpret_cast<const char *>(in.data()) + off,
+                                    out_buf.data(), static_cast<int>(comp_sz),
+                                    static_cast<int>(out_buf.size()));
         if (n < 0) {
+            LOGE("magiskboot: LZ4_decompress_safe failed: %d\n", n);
             throw std::runtime_error("LZ4 legacy decompress failed");
         }
-        if (n > 0 && xwrite(out_fd, out_buf.data(), static_cast<std::size_t>(n)) < 0) {
-            throw std::runtime_error("write failed");
-        }
+        xwrite(out_fd, out_buf.data(), n);
         off += comp_sz;
     }
 }

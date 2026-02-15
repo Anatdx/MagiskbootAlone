@@ -637,9 +637,7 @@ int unpack(Utf8CStr image, bool skip_decomp, bool hdr) {
             owned_fd fd = owned_fd(xopenat(dirfd, file_name, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644));
             FileFormat fmt = check_fmt_lg(boot.ramdisk + it.ramdisk_offset, it.ramdisk_size);
             if (!skip_decomp && fmt_compressed(fmt)) {
-                std::vector<uint8_t> vnd_copy(boot.ramdisk + it.ramdisk_offset,
-                    boot.ramdisk + it.ramdisk_offset + it.ramdisk_size);
-                decompress(fmt, fd, vnd_copy.data(), vnd_copy.size());
+                decompress(fmt, fd, boot.ramdisk + it.ramdisk_offset, it.ramdisk_size);
             } else {
                 xwrite(fd, boot.ramdisk + it.ramdisk_offset, it.ramdisk_size);
             }
@@ -647,8 +645,7 @@ int unpack(Utf8CStr image, bool skip_decomp, bool hdr) {
     } else if (!skip_decomp && fmt_compressed(boot.r_fmt)) {
         if (boot.hdr->ramdisk_size() != 0) {
             int fd = creat(RAMDISK_FILE, 0644);
-            std::vector<uint8_t> ramdisk_copy(boot.ramdisk, boot.ramdisk + boot.hdr->ramdisk_size());
-            decompress(boot.r_fmt, fd, ramdisk_copy.data(), ramdisk_copy.size());
+            decompress(boot.r_fmt, fd, boot.ramdisk, boot.hdr->ramdisk_size());
             close(fd);
         }
     } else {
