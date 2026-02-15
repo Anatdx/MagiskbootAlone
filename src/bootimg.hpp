@@ -1,9 +1,12 @@
 #pragma once
 
-#include <cstdint>
-#include <utility>
+#include <array>
 #include <bitset>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
+#include <utility>
 
 #include "base_host.hpp"
 #include "boot_crypto.hpp"
@@ -14,65 +17,63 @@
  *****************/
 
 struct mtk_hdr {
-    uint32_t magic;         /* MTK magic */
-    uint32_t size;          /* Size of the content */
-    char name[32];          /* The type of the header */
-
-    char padding[472];      /* Padding to 512 bytes */
+    uint32_t magic;                    /* MTK magic */
+    uint32_t size;                     /* Size of the content */
+    std::array<char, 32> name;         /* The type of the header */
+    std::array<char, 472> padding;     /* Padding to 512 bytes */
 } __attribute__((packed));
 
 struct dhtb_hdr {
-    char magic[8];          /* DHTB magic */
-    uint8_t checksum[40];   /* Payload SHA256, whole image + SEANDROIDENFORCE + 0xFFFFFFFF */
-    uint32_t size;          /* Payload size, whole image + SEANDROIDENFORCE + 0xFFFFFFFF */
-
-    char padding[460];      /* Padding to 512 bytes */
+    std::array<char, 8> magic;         /* DHTB magic */
+    std::array<uint8_t, 40> checksum; /* Payload SHA256 */
+    uint32_t size;                     /* Payload size */
+    std::array<char, 460> padding;     /* Padding to 512 bytes */
 } __attribute__((packed));
 
 struct blob_hdr {
-    char secure_magic[20];  /* "-SIGNED-BY-SIGNBLOB-" */
-    uint32_t datalen;       /* 0x00000000 */
-    uint32_t signature;     /* 0x00000000 */
-    char magic[16];         /* "MSM-RADIO-UPDATE" */
-    uint32_t hdr_version;   /* 0x00010000 */
-    uint32_t hdr_size;      /* Size of header */
-    uint32_t part_offset;   /* Same as size */
-    uint32_t num_parts;     /* Number of partitions */
-    uint32_t unknown[7];    /* All 0x00000000 */
-    char name[4];           /* Name of partition */
-    uint32_t offset;        /* offset in blob where this partition starts */
-    uint32_t size;          /* Size of data */
-    uint32_t version;       /* 0x00000001 */
+    std::array<char, 20> secure_magic; /* "-SIGNED-BY-SIGNBLOB-" */
+    uint32_t datalen;
+    uint32_t signature;
+    std::array<char, 16> magic;         /* "MSM-RADIO-UPDATE" */
+    uint32_t hdr_version;
+    uint32_t hdr_size;
+    uint32_t part_offset;
+    uint32_t num_parts;
+    std::array<uint32_t, 7> unknown;
+    std::array<char, 4> name;
+    uint32_t offset;
+    uint32_t size;
+    uint32_t version;
 } __attribute__((packed));
 
 struct zimage_hdr {
-    uint32_t code[9];
-    uint32_t magic;      /* zImage magic */
-    uint32_t start;      /* absolute load/run zImage address */
-    uint32_t end;        /* zImage end address */
-    uint32_t endian;     /* endianness flag */
+    std::array<uint32_t, 9> code;
+    uint32_t magic;   /* zImage magic */
+    uint32_t start;   /* absolute load/run zImage address */
+    uint32_t end;     /* zImage end address */
+    uint32_t endian;  /* endianness flag */
 } __attribute__((packed));
 
 /**************
  * AVB Headers
  **************/
 
-#define AVB_FOOTER_MAGIC_LEN 4
-#define AVB_MAGIC_LEN 4
-#define AVB_RELEASE_STRING_SIZE 48
+constexpr size_t AVB_FOOTER_MAGIC_LEN = 4;
+constexpr size_t AVB_MAGIC_LEN = 4;
+constexpr size_t AVB_RELEASE_STRING_SIZE = 48;
 
 struct AvbFooter {
-    uint8_t magic[AVB_FOOTER_MAGIC_LEN];
+    std::array<uint8_t, AVB_FOOTER_MAGIC_LEN> magic;
     uint32_t version_major;
     uint32_t version_minor;
     uint64_t original_image_size;
     uint64_t vbmeta_offset;
     uint64_t vbmeta_size;
-    uint8_t reserved[28];
+    std::array<uint8_t, 28> reserved;
 } __attribute__((packed));
 
 struct AvbVBMetaImageHeader {
-    uint8_t magic[AVB_MAGIC_LEN];
+    std::array<uint8_t, AVB_MAGIC_LEN> magic;
     uint32_t required_libavb_version_major;
     uint32_t required_libavb_version_minor;
     uint64_t authentication_data_block_size;
@@ -91,30 +92,32 @@ struct AvbVBMetaImageHeader {
     uint64_t rollback_index;
     uint32_t flags;
     uint32_t rollback_index_location;
-    uint8_t release_string[AVB_RELEASE_STRING_SIZE];
-    uint8_t reserved[80];
+    std::array<uint8_t, AVB_RELEASE_STRING_SIZE> release_string;
+    std::array<uint8_t, 80> reserved;
 } __attribute__((packed));
 
 /*********************
  * Boot Image Headers
  *********************/
 
-#define BOOT_MAGIC_SIZE 8
-#define BOOT_NAME_SIZE 16
-#define BOOT_ID_SIZE 32
-#define BOOT_ARGS_SIZE 512
-#define BOOT_EXTRA_ARGS_SIZE 1024
-#define VENDOR_BOOT_ARGS_SIZE 2048
-#define VENDOR_RAMDISK_NAME_SIZE 32
-#define VENDOR_RAMDISK_TABLE_ENTRY_BOARD_ID_SIZE 16
+constexpr size_t BOOT_MAGIC_SIZE = 8;
+constexpr size_t BOOT_NAME_SIZE = 16;
+constexpr size_t BOOT_ID_SIZE = 32;
+constexpr size_t BOOT_ARGS_SIZE = 512;
+constexpr size_t BOOT_EXTRA_ARGS_SIZE = 1024;
+constexpr size_t VENDOR_BOOT_ARGS_SIZE = 2048;
+constexpr size_t VENDOR_RAMDISK_NAME_SIZE = 32;
+constexpr size_t VENDOR_RAMDISK_TABLE_ENTRY_BOARD_ID_SIZE = 16;
 
-#define VENDOR_RAMDISK_TYPE_NONE 0
-#define VENDOR_RAMDISK_TYPE_PLATFORM 1
-#define VENDOR_RAMDISK_TYPE_RECOVERY 2
-#define VENDOR_RAMDISK_TYPE_DLKM 3
+enum VendorRamdiskType : uint32_t {
+    VENDOR_RAMDISK_TYPE_NONE = 0,
+    VENDOR_RAMDISK_TYPE_PLATFORM = 1,
+    VENDOR_RAMDISK_TYPE_RECOVERY = 2,
+    VENDOR_RAMDISK_TYPE_DLKM = 3,
+};
 
 struct boot_img_hdr_v0_common {
-    char magic[BOOT_MAGIC_SIZE];
+    std::array<char, BOOT_MAGIC_SIZE> magic;
     uint32_t kernel_size;
     uint32_t kernel_addr;
     uint32_t ramdisk_size;
@@ -125,13 +128,19 @@ struct boot_img_hdr_v0_common {
 
 struct boot_img_hdr_v0 : public boot_img_hdr_v0_common {
     uint32_t tags_addr;
-    union { uint32_t unknown; uint32_t page_size; };
-    union { uint32_t header_version; uint32_t extra_size; };
+    union {
+        uint32_t unknown;
+        uint32_t page_size;
+    };
+    union {
+        uint32_t header_version;
+        uint32_t extra_size;
+    };
     uint32_t os_version;
-    char name[BOOT_NAME_SIZE];
-    char cmdline[BOOT_ARGS_SIZE];
-    char id[BOOT_ID_SIZE];
-    char extra_cmdline[BOOT_EXTRA_ARGS_SIZE];
+    std::array<char, BOOT_NAME_SIZE> name;
+    std::array<char, BOOT_ARGS_SIZE> cmdline;
+    std::array<char, BOOT_ID_SIZE> id;
+    std::array<char, BOOT_EXTRA_ARGS_SIZE> extra_cmdline;
 } __attribute__((packed));
 
 struct boot_img_hdr_v1 : public boot_img_hdr_v0 {
@@ -145,38 +154,42 @@ struct boot_img_hdr_v2 : public boot_img_hdr_v1 {
     uint64_t dtb_addr;
 } __attribute__((packed));
 
+constexpr size_t BOOT_PXA_NAME_SIZE = 24;
+
 struct boot_img_hdr_pxa : public boot_img_hdr_v0_common {
     uint32_t extra_size;
     uint32_t unknown;
     uint32_t tags_addr;
     uint32_t page_size;
-    char name[24];
-    char cmdline[BOOT_ARGS_SIZE];
-    char id[BOOT_ID_SIZE];
-    char extra_cmdline[BOOT_EXTRA_ARGS_SIZE];
+    std::array<char, BOOT_PXA_NAME_SIZE> name;
+    std::array<char, BOOT_ARGS_SIZE> cmdline;
+    std::array<char, BOOT_ID_SIZE> id;
+    std::array<char, BOOT_EXTRA_ARGS_SIZE> extra_cmdline;
 } __attribute__((packed));
 
+constexpr size_t BOOT_V3_CMDLINE_SIZE = BOOT_ARGS_SIZE + BOOT_EXTRA_ARGS_SIZE;
+
 struct boot_img_hdr_v3 {
-    uint8_t magic[BOOT_MAGIC_SIZE];
+    std::array<uint8_t, BOOT_MAGIC_SIZE> magic;
     uint32_t kernel_size;
     uint32_t ramdisk_size;
     uint32_t os_version;
     uint32_t header_size;
-    uint32_t reserved[4];
+    std::array<uint32_t, 4> reserved;
     uint32_t header_version;
-    char cmdline[BOOT_ARGS_SIZE + BOOT_EXTRA_ARGS_SIZE];
+    std::array<char, BOOT_V3_CMDLINE_SIZE> cmdline;
 } __attribute__((packed));
 
 struct boot_img_hdr_vnd_v3 {
-    uint8_t magic[BOOT_MAGIC_SIZE];
+    std::array<uint8_t, BOOT_MAGIC_SIZE> magic;
     uint32_t header_version;
     uint32_t page_size;
     uint32_t kernel_addr;
     uint32_t ramdisk_addr;
     uint32_t ramdisk_size;
-    char cmdline[VENDOR_BOOT_ARGS_SIZE];
+    std::array<char, VENDOR_BOOT_ARGS_SIZE> cmdline;
     uint32_t tags_addr;
-    char name[BOOT_NAME_SIZE];
+    std::array<char, BOOT_NAME_SIZE> name;
     uint32_t header_size;
     uint32_t dtb_size;
     uint64_t dtb_addr;
@@ -197,8 +210,8 @@ struct vendor_ramdisk_table_entry_v4 {
     uint32_t ramdisk_size;
     uint32_t ramdisk_offset;
     uint32_t ramdisk_type;
-    char ramdisk_name[VENDOR_RAMDISK_NAME_SIZE];
-    uint32_t board_id[VENDOR_RAMDISK_TABLE_ENTRY_BOARD_ID_SIZE];
+    std::array<char, VENDOR_RAMDISK_NAME_SIZE> ramdisk_name;
+    std::array<uint32_t, VENDOR_RAMDISK_TABLE_ENTRY_BOARD_ID_SIZE> board_id;
 } __attribute__((packed));
 
 /*******************************
@@ -208,8 +221,9 @@ struct vendor_ramdisk_table_entry_v4 {
 #define decl_val(name, len) \
 virtual uint##len##_t name() const { return 0; }
 
+/* Use set_* getter/setter to avoid returning ref to packed member (Clang/GCC). */
 #define decl_var(name, len) \
-virtual uint##len##_t &name() { return j##len(); } \
+virtual void set_##name(uint##len##_t v) { (void)v; } \
 decl_val(name, len)
 
 #define decl_str(name) \
@@ -257,12 +271,6 @@ protected:
         boot_img_hdr_pxa *hdr_pxa;
         void *raw;
     };
-    static uint32_t &j32() { _j32 = 0; return _j32; }
-    static uint64_t &j64() { _j64 = 0; return _j64; }
-
-private:
-    inline static uint32_t _j32 = 0;
-    inline static uint64_t _j64 = 0;
 };
 
 #undef decl_var
@@ -285,15 +293,20 @@ dyn_img_hdr *clone() const override {   \
 }
 
 #define __impl_val(name, hdr_name) \
-decltype(std::declval<const dyn_img_hdr>().name()) name() const override { return hdr_name->name; }
+decltype(std::declval<const dyn_img_hdr>().name()) name() const override { return (hdr_name)->name; }
 
 #define __impl_var(name, hdr_name) \
-decltype(std::declval<dyn_img_hdr>().name()) name() override { return hdr_name->name; } \
+void set_##name(decltype((hdr_name)->name) v) override { (hdr_name)->name = v; } \
 __impl_val(name, hdr_name)
+
+#define __impl_str(name, hdr_name) \
+char *name() override { return (hdr_name)->name.data(); } \
+const char *name() const override { return (hdr_name)->name.data(); }
 
 #define impl_cls(ver)  __impl_cls(dyn_img_##ver, boot_img_hdr_##ver)
 #define impl_val(name) __impl_val(name, v2_hdr)
 #define impl_var(name) __impl_var(name, v2_hdr)
+#define impl_str(name) __impl_str(name, v2_hdr)
 
 struct dyn_img_hdr_boot : public dyn_img_hdr {
     bool is_vendor() const final { return false; }
@@ -310,10 +323,10 @@ struct dyn_img_v0 : public dyn_img_common {
     impl_val(page_size)
     impl_var(extra_size)
     impl_var(os_version)
-    impl_var(name)
-    impl_var(cmdline)
-    impl_var(id)
-    impl_var(extra_cmdline)
+    impl_str(name)
+    impl_str(cmdline)
+    impl_str(id)
+    impl_str(extra_cmdline)
 };
 
 struct dyn_img_v1 : public dyn_img_v0 {
@@ -322,7 +335,7 @@ struct dyn_img_v1 : public dyn_img_v0 {
     impl_var(recovery_dtbo_size)
     impl_var(recovery_dtbo_offset)
     impl_var(header_size)
-    uint32_t &extra_size() override { return j32(); }
+    void set_extra_size(uint32_t) override {}
     uint32_t extra_size() const override { return 0; }
 };
 
@@ -333,23 +346,27 @@ struct dyn_img_v2 : public dyn_img_v1 {
 
 #undef impl_val
 #undef impl_var
+#undef impl_str
 #define impl_val(name) __impl_val(name, hdr_pxa)
 #define impl_var(name) __impl_var(name, hdr_pxa)
+#define impl_str(name) __impl_str(name, hdr_pxa)
 
 struct dyn_img_pxa : public dyn_img_common {
     impl_cls(pxa)
     impl_var(extra_size)
     impl_val(page_size)
-    impl_var(name)
-    impl_var(cmdline)
-    impl_var(id)
-    impl_var(extra_cmdline)
+    impl_str(name)
+    impl_str(cmdline)
+    impl_str(id)
+    impl_str(extra_cmdline)
 };
 
 #undef impl_val
 #undef impl_var
+#undef impl_str
 #define impl_val(name) __impl_val(name, v4_hdr)
 #define impl_var(name) __impl_var(name, v4_hdr)
+#define impl_str(name) __impl_str(name, v4_hdr)
 
 struct dyn_img_v3 : public dyn_img_hdr_boot {
     impl_cls(v3)
@@ -358,7 +375,7 @@ struct dyn_img_v3 : public dyn_img_hdr_boot {
     impl_var(os_version)
     impl_var(header_size)
     impl_val(header_version)
-    impl_var(cmdline)
+    impl_str(cmdline)
     uint32_t page_size() const override { return 4096; }
     char *extra_cmdline() override { return &v4_hdr->cmdline[BOOT_ARGS_SIZE]; }
     const char *extra_cmdline() const override { return &v4_hdr->cmdline[BOOT_ARGS_SIZE]; }
@@ -375,16 +392,18 @@ struct dyn_img_hdr_vendor : public dyn_img_hdr {
 
 #undef impl_val
 #undef impl_var
+#undef impl_str
 #define impl_val(name) __impl_val(name, v4_vnd)
 #define impl_var(name) __impl_var(name, v4_vnd)
+#define impl_str(name) __impl_str(name, v4_vnd)
 
 struct dyn_img_vnd_v3 : public dyn_img_hdr_vendor {
     impl_cls(vnd_v3)
     impl_val(header_version)
     impl_val(page_size)
     impl_var(ramdisk_size)
-    impl_var(cmdline)
-    impl_var(name)
+    impl_str(cmdline)
+    impl_str(name)
     impl_var(header_size)
     impl_var(dtb_size)
     size_t hdr_space() const override { return align_to(hdr_size(), page_size()); }
@@ -403,9 +422,11 @@ struct dyn_img_vnd_v4 : public dyn_img_vnd_v3 {
 #undef __impl_cls
 #undef __impl_val
 #undef __impl_var
+#undef __impl_str
 #undef impl_cls
 #undef impl_val
 #undef impl_var
+#undef impl_str
 
 /******************
  * Full Boot Image

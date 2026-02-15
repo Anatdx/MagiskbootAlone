@@ -1,0 +1,16 @@
+# MagiskbootAlone: strict clang-tidy for C++20 (host/Android)
+FormatStyle: none
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*
+CheckOptions:
+  - key: readability-identifier-length.MinimumLength
+    value: '2'
+  - key: readability-magic-numbers.IgnoredValues
+    value: '0,1,2,3,4,8,16,32,64,128,256,512,1024,4096'
