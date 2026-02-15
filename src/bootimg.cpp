@@ -718,6 +718,14 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     }
 
     off.header = lseek(fd, 0, SEEK_CUR);
+    if (!boot.payload.data() || boot.payload.size() < hdr->hdr_space()) {
+        fprintf(stderr, "repack: payload invalid (data=%p size=%zu hdr_space=%zu)\n",
+                static_cast<const void *>(boot.payload.data()), boot.payload.size(),
+                static_cast<size_t>(hdr->hdr_space()));
+        delete hdr;
+        close(fd);
+        return;
+    }
     xwrite(fd, boot.payload.data(), hdr->hdr_space());
 
     off.kernel = lseek(fd, 0, SEEK_CUR);
@@ -797,7 +805,15 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
         hdr->set_ramdisk_size(ramdisk_offset);
         file_align();
     } else if (access(RAMDISK_FILE, R_OK) == 0) {
+        fprintf(stderr, "repack: writing ramdisk\n");
+        fflush(stderr);
         mmap_data m(RAMDISK_FILE);
+        if (!m.data() && m.size() == 0) {
+            fprintf(stderr, "repack: RAMDISK_FILE mmap failed\n");
+            delete hdr;
+            close(fd);
+            return;
+        }
         auto r_fmt = boot.r_fmt;
         if (!skip_comp && !hdr->is_vendor() && hdr->header_version() == 4 && r_fmt != FileFormat::LZ4_LEGACY) {
             fprintf(stderr, "RAMDISK_FMT: [%s] -> [%s]\n", fmt2name(r_fmt), fmt2name(FileFormat::LZ4_LEGACY));
@@ -808,6 +824,8 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
         } else {
             hdr->set_ramdisk_size(xwrite(fd, m.data(), m.size()));
         }
+        fprintf(stderr, "repack: ramdisk done\n");
+        fflush(stderr);
         file_align();
     }
 
@@ -882,6 +900,9 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     }
 
     uint32_t aosp_img_size = off.tail - off.header;
+
+    fprintf(stderr, "repack: patch phase (pread/pwrite)\n");
+    fflush(stderr);
 
     off_t file_sz = lseek(fd, 0, SEEK_END);
     if (file_sz <= 0) {
