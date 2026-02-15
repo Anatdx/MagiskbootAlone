@@ -199,7 +199,8 @@ bool CpioArchive::load(const std::string& path) {
         }
 
         std::string name(reinterpret_cast<const char*>(p + off), namesize > 0 ? namesize - 1 : 0);
-        off += align4(namesize);
+        off += static_cast<std::size_t>(namesize);
+        off = (off + 3) & ~static_cast<std::size_t>(3); /* newc: pathname then padding to 4-byte */
         if (off + filesize > total) {
             LOGE("Invalid cpio filesize\n");
             return false;
