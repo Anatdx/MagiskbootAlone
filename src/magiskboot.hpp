@@ -74,6 +74,3 @@ inline int split_image_dtb(const char *filename, bool skip_decomp = false) {
 #define AVB_FOOTER_MAGIC "AVBf"
 #define AVB_MAGIC "AVB0"
 #define ZIMAGE_MAGIC "\x18\x28\x6f\x01"
-
-// Entry point for in-process call (multi-call ksud); argv[0]=="magiskboot", argv[1]=cmd, ...
-int magiskboot_main(int argc, char **argv);
