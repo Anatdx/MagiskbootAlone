@@ -63,36 +63,33 @@ static bool guess_lzma(const uint8_t *buf, size_t len) {
 }
 
 FileFormat check_fmt(const void *buf, size_t len) {
-    const uint8_t *b = static_cast<const uint8_t *>(buf);
-    if (len >= (sizeof(CHROMEOS_MAGIC) - 1) && BUFFER_MATCH(b, CHROMEOS_MAGIC)) {
+    if (CHECKED_MATCH(CHROMEOS_MAGIC)) {
         return FileFormat::CHROMEOS;
-    } else if (len >= (sizeof(BOOT_MAGIC) - 1) && BUFFER_MATCH(b, BOOT_MAGIC)) {
+    } else if (CHECKED_MATCH(BOOT_MAGIC)) {
         return FileFormat::AOSP;
-    } else if (len >= (sizeof(VENDOR_BOOT_MAGIC) - 1) && BUFFER_MATCH(b, VENDOR_BOOT_MAGIC)) {
+    } else if (CHECKED_MATCH(VENDOR_BOOT_MAGIC)) {
         return FileFormat::AOSP_VENDOR;
-    } else if ((len >= (sizeof(GZIP1_MAGIC) - 1) && BUFFER_MATCH(b, GZIP1_MAGIC)) ||
-               (len >= (sizeof(GZIP2_MAGIC) - 1) && BUFFER_MATCH(b, GZIP2_MAGIC))) {
+    } else if (CHECKED_MATCH(GZIP1_MAGIC) || CHECKED_MATCH(GZIP2_MAGIC)) {
         return FileFormat::GZIP;
-    } else if (len >= (sizeof(LZOP_MAGIC) - 1) && BUFFER_MATCH(b, LZOP_MAGIC)) {
+    } else if (CHECKED_MATCH(LZOP_MAGIC)) {
         return FileFormat::LZOP;
-    } else if (len >= (sizeof(XZ_MAGIC) - 1) && BUFFER_MATCH(b, XZ_MAGIC)) {
+    } else if (CHECKED_MATCH(XZ_MAGIC)) {
         return FileFormat::XZ;
-    } else if (guess_lzma(b, len)) {
+    } else if (guess_lzma(static_cast<const uint8_t *>(buf), len)) {
         return FileFormat::LZMA;
-    } else if (len >= (sizeof(BZIP_MAGIC) - 1) && BUFFER_MATCH(b, BZIP_MAGIC)) {
+    } else if (CHECKED_MATCH(BZIP_MAGIC)) {
         return FileFormat::BZIP2;
-    } else if ((len >= (sizeof(LZ41_MAGIC) - 1) && BUFFER_MATCH(b, LZ41_MAGIC)) ||
-               (len >= (sizeof(LZ42_MAGIC) - 1) && BUFFER_MATCH(b, LZ42_MAGIC))) {
+    } else if (CHECKED_MATCH(LZ41_MAGIC) || CHECKED_MATCH(LZ42_MAGIC)) {
         return FileFormat::LZ4;
-    } else if (len >= (sizeof(LZ4_LEG_MAGIC) - 1) && BUFFER_MATCH(b, LZ4_LEG_MAGIC)) {
+    } else if (CHECKED_MATCH(LZ4_LEG_MAGIC)) {
         return FileFormat::LZ4_LEGACY;
-    } else if (len >= (sizeof(MTK_MAGIC) - 1) && BUFFER_MATCH(b, MTK_MAGIC)) {
+    } else if (CHECKED_MATCH(MTK_MAGIC)) {
         return FileFormat::MTK;
-    } else if (len >= (sizeof(DTB_MAGIC) - 1) && BUFFER_MATCH(b, DTB_MAGIC)) {
+    } else if (CHECKED_MATCH(DTB_MAGIC)) {
         return FileFormat::DTB;
-    } else if (len >= (sizeof(DHTB_MAGIC) - 1) && BUFFER_MATCH(b, DHTB_MAGIC)) {
+    } else if (CHECKED_MATCH(DHTB_MAGIC)) {
         return FileFormat::DHTB;
-    } else if (len >= (sizeof(TEGRABLOB_MAGIC) - 1) && BUFFER_MATCH(b, TEGRABLOB_MAGIC)) {
+    } else if (CHECKED_MATCH(TEGRABLOB_MAGIC)) {
         return FileFormat::BLOB;
     } else if (len >= 0x28 && memcmp(&(static_cast<const char *>(buf))[0x24], ZIMAGE_MAGIC, 4) == 0) {
         return FileFormat::ZIMAGE;
@@ -560,6 +557,7 @@ bool boot_img::parse_image(const uint8_t *addr, FileFormat type) {
     }
 
     if (tail.size()) {
+        // Check special flags
         if (tail.size() >= 16 && BUFFER_MATCH(tail.data(), SEANDROID_MAGIC)) {
             fprintf(stderr, "SAMSUNG_SEANDROID\n");
             flags[SEANDROID_FLAG] = true;
@@ -571,19 +569,16 @@ bool boot_img::parse_image(const uint8_t *addr, FileFormat type) {
             flags[AVB1_SIGNED_FLAG] = true;
         }
 
+        // Find AVB footer
         const void *footer = tail.data() + tail.size() - sizeof(AvbFooter);
         if (BUFFER_MATCH(footer, AVB_FOOTER_MAGIC)) {
             avb_footer = static_cast<const AvbFooter *>(footer);
-            uint64_t vbmeta_off = __builtin_bswap64(avb_footer->vbmeta_offset);
-            uint64_t vbmeta_sz = __builtin_bswap64(avb_footer->vbmeta_size);
-            if (vbmeta_off <= map.size() && vbmeta_sz <= map.size() &&
-                vbmeta_off + vbmeta_sz <= map.size()) {
-                const void *meta = map.data() + static_cast<size_t>(vbmeta_off);
-                if (BUFFER_MATCH(meta, AVB_MAGIC)) {
-                    fprintf(stderr, "VBMETA\n");
-                    flags[AVB_FLAG] = true;
-                    vbmeta = static_cast<const AvbVBMetaImageHeader *>(meta);
-                }
+            // Double check if meta header exists
+            const void *meta = payload.data() + __builtin_bswap64(avb_footer->vbmeta_offset);
+            if (BUFFER_MATCH(meta, AVB_MAGIC)) {
+                fprintf(stderr, "VBMETA\n");
+                flags[AVB_FLAG] = true;
+                vbmeta = static_cast<const AvbVBMetaImageHeader *>(meta);
             }
         }
     }
@@ -722,15 +717,8 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
         xwrite(fd, boot.map.data(), ACCLAIM_PRE_HEADER_SZ);
     }
 
+    // Copy raw header
     off.header = lseek(fd, 0, SEEK_CUR);
-    if (!boot.payload.data() || boot.payload.size() < hdr->hdr_space()) {
-        fprintf(stderr, "repack: payload invalid (data=%p size=%zu hdr_space=%zu)\n",
-                static_cast<const void *>(boot.payload.data()), boot.payload.size(),
-                static_cast<size_t>(hdr->hdr_space()));
-        delete hdr;
-        close(fd);
-        return;
-    }
     xwrite(fd, boot.payload.data(), hdr->hdr_space());
 
     off.kernel = lseek(fd, 0, SEEK_CUR);
@@ -810,8 +798,6 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
         hdr->set_ramdisk_size(ramdisk_offset);
         file_align();
     } else if (access(RAMDISK_FILE, R_OK) == 0) {
-        fprintf(stderr, "repack: writing ramdisk\n");
-        fflush(stderr);
         mmap_data m(RAMDISK_FILE);
         if (!m.data() && m.size() == 0) {
             fprintf(stderr, "repack: RAMDISK_FILE mmap failed\n");
@@ -829,13 +815,9 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
         } else {
             hdr->set_ramdisk_size(xwrite(fd, m.data(), m.size()));
         }
-        fprintf(stderr, "repack: ramdisk done\n");
-        fflush(stderr);
         file_align();
     }
 
-    fprintf(stderr, "repack: after ramdisk align\n");
-    fflush(stderr);
     off.second = lseek(fd, 0, SEEK_CUR);
     if (access(SECOND_FILE, R_OK) == 0) {
         hdr->set_second_size(restore(fd, SECOND_FILE));
@@ -892,28 +874,17 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     off.tail = lseek(fd, 0, SEEK_CUR);
     file_align();
 
-    fprintf(stderr, "repack: before avb\n");
-    fflush(stderr);
+    // vbmeta
     if (boot.flags[AVB_FLAG]) {
+        // According to avbtool.py, if the input is not an Android sparse image
+        // (which boot images are not), the default block size is 4096
         file_align_with(4096);
         off.vbmeta = lseek(fd, 0, SEEK_CUR);
-        uint64_t vbmeta_off = __builtin_bswap64(boot.avb_footer->vbmeta_offset);
         uint64_t vbmeta_size = __builtin_bswap64(boot.avb_footer->vbmeta_size);
-        if (vbmeta_off > boot.map.size() || vbmeta_size > boot.map.size() ||
-            vbmeta_off + vbmeta_size > boot.map.size()) {
-            fprintf(stderr, "repack: vbmeta source out of bounds (off=%llu sz=%llu map=%zu)\n",
-                    static_cast<unsigned long long>(vbmeta_off),
-                    static_cast<unsigned long long>(vbmeta_size), boot.map.size());
-            delete hdr;
-            close(fd);
-            return;
-        }
-        fprintf(stderr, "repack: writing vbmeta\n");
-        fflush(stderr);
-        xwrite(fd, boot.map.data() + static_cast<size_t>(vbmeta_off),
-               static_cast<size_t>(vbmeta_size));
+        xwrite(fd, boot.vbmeta, static_cast<size_t>(vbmeta_size));
     }
 
+    // Pad image to original size if not chromeos (as it requires post processing)
     if (!boot.flags[CHROMEOS_FLAG]) {
         off_t current = lseek(fd, 0, SEEK_CUR);
         if (current < static_cast<off_t>(boot.map.size())) {
@@ -922,9 +893,6 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     }
 
     uint32_t aosp_img_size = off.tail - off.header;
-
-    fprintf(stderr, "repack: patch phase (pread/pwrite)\n");
-    fflush(stderr);
 
     off_t file_sz = lseek(fd, 0, SEEK_END);
     if (file_sz <= 0) {
