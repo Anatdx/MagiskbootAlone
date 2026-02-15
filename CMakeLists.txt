@@ -7,9 +7,24 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(MAGISKBOOT_USE_OPENSSL "Use OpenSSL for SHA1/SHA256" ON)
 
-# Prefer vendored LZ4 (from Magisk) in external/lz4 for same ABI as Magisk magiskboot
+# LZ4: Android uses Magisk's LZ4 (git clone in CMake) for identical ABI/behavior as Magisk magiskboot.
+# Host can use vendored external/lz4 or upstream lz4.
 set(LZ4_VENDORED "${CMAKE_CURRENT_SOURCE_DIR}/external/lz4")
-if(EXISTS "${LZ4_VENDORED}/lz4.c")
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+  include(FetchContent)
+  FetchContent_Declare(
+    magisk_lz4
+    GIT_REPOSITORY https://github.com/topjohnwu/Magisk.git
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+  )
+  FetchContent_GetProperties(magisk_lz4)
+  if(NOT magisk_lz4_POPULATED)
+    FetchContent_Populate(magisk_lz4)
+  endif()
+  set(LZ4_LIB_DIR "${magisk_lz4_SOURCE_DIR}/native/src/external/lz4/lib")
+  message(STATUS "magiskboot: using LZ4 from Magisk (git clone)")
+elseif(EXISTS "${LZ4_VENDORED}/lz4.c")
   set(LZ4_LIB_DIR "${LZ4_VENDORED}")
   message(STATUS "magiskboot: using vendored LZ4 (external/lz4)")
 else()
@@ -22,6 +37,7 @@ else()
   )
   FetchContent_MakeAvailable(lz4)
   set(LZ4_LIB_DIR ${lz4_SOURCE_DIR}/lib)
+  message(STATUS "magiskboot: using LZ4 from FetchContent (upstream)")
 endif()
 
 # Host (Linux/macOS/Windows): find zlib and optional OpenSSL.

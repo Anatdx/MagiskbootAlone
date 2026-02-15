@@ -1,4 +1,5 @@
-# LZ4 library (vendored from Magisk)
+# LZ4 library (from Magisk)
 
-Source: Magisk `native/src/external/lz4/lib/`
-Used for boot image ramdisk LZ4_LEGACY decompression. Same ABI/behavior as Magisk magiskboot.
+Synced from Magisk repo: `native/src/external/lz4/lib/` (lz4.c, lz4.h, lz4hc.c, lz4hc.h, lz4frame.c, lz4frame.h, lz4frame_static.h, xxhash.c, xxhash.h).
+
+Using the same LZ4 source as official Magisk magiskboot ensures identical LZ4_LEGACY decompress behavior and avoids SIGSEGV on some devices. To refresh: copy the above files from Magisk's external/lz4/lib/ into this directory.
