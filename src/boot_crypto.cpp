@@ -105,7 +105,7 @@ namespace {
 
 constexpr unsigned char LZ4_LEGACY_MAGIC[] = {0x02, 0x21, 0x4c, 0x18};
 constexpr std::size_t LZ4_LEGACY_MAGIC_SIZE = sizeof(LZ4_LEGACY_MAGIC);
-constexpr std::size_t LZ4_LEGACY_BLOCK_LIMIT = 8 * 1024 * 1024;
+constexpr std::size_t LZ4_LEGACY_BLOCK_MAX = 8 * 1024 * 1024;  // 8MB max decompress per block (match Magisk)
 constexpr std::size_t LZ4_LEGACY_COMPRESS_BLOCK = 64 * 1024;
 
 [[noreturn]] void unsupported_format(const char *op, FileFormat fmt) {
@@ -182,6 +182,7 @@ void lz4_legacy_compress(byte_view in, int out_fd) {
     }
 }
 
+// LZ4 legacy (block format: magic + [4-byte comp_sz LE][block]...) — match Magisk native/src/boot/boot_crypto.cpp
 void lz4_legacy_decompress(byte_view in, int out_fd) {
     if (in.size() <= LZ4_LEGACY_MAGIC_SIZE + 4) {
         throw std::runtime_error("LZ4 legacy stream too short");
@@ -190,7 +191,7 @@ void lz4_legacy_decompress(byte_view in, int out_fd) {
         throw std::runtime_error("LZ4 legacy bad magic");
     }
 
-    std::vector<char> out_buf(LZ4_LEGACY_BLOCK_LIMIT);
+    std::vector<char> out_buf(LZ4_LEGACY_BLOCK_MAX);
     std::size_t off = LZ4_LEGACY_MAGIC_SIZE;
     while (off + 4 <= in.size()) {
         std::uint32_t comp_sz;
@@ -199,7 +200,7 @@ void lz4_legacy_decompress(byte_view in, int out_fd) {
         if (comp_sz == 0) {
             break;
         }
-        if (comp_sz > LZ4_LEGACY_BLOCK_LIMIT || off + comp_sz > in.size()) {
+        if (off + comp_sz > in.size()) {
             throw std::runtime_error("LZ4 legacy block overrun");
         }
         int n = LZ4_decompress_safe(reinterpret_cast<const char *>(in.data() + off),
