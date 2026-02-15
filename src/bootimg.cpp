@@ -634,7 +634,7 @@ int unpack(Utf8CStr image, bool skip_decomp, bool hdr) {
             if (it.ramdisk_name[0] == '\0') {
                 strscpy(file_name, RAMDISK_FILE, sizeof(file_name));
             } else {
-                ssprintf(file_name, sizeof(file_name), "%s.cpio", it.ramdisk_name.data());
+                ssprintf(file_name, sizeof(file_name), "%.*s.cpio", static_cast<int>(it.ramdisk_name.size()), it.ramdisk_name.data());
             }
             owned_fd fd = owned_fd(xopenat(dirfd, file_name, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644));
             FileFormat fmt = check_fmt_lg(boot.ramdisk + it.ramdisk_offset, it.ramdisk_size);
@@ -781,7 +781,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
             if (it.ramdisk_name[0] == '\0') {
                 strscpy(file_name, RAMDISK_FILE, sizeof(file_name));
             } else {
-                ssprintf(file_name, sizeof(file_name), "%s.cpio", it.ramdisk_name.data());
+                ssprintf(file_name, sizeof(file_name), "%.*s.cpio", static_cast<int>(it.ramdisk_name.size()), it.ramdisk_name.data());
             }
             mmap_data m(dirfd, file_name);
             FileFormat fmt = check_fmt_lg(boot.ramdisk + it.ramdisk_offset, it.ramdisk_size);

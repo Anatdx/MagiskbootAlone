@@ -188,16 +188,20 @@ bool CpioArchive::load(const std::string& path) {
     while (off + sizeof(NewcHeader) <= total) {
         const auto* h = reinterpret_cast<const NewcHeader*>(p + off);
         if (std::memcmp(h->magic.data(), kNewcMagic.data(), 6) != 0) {
-            /* Only at start: skip leading garbage (some images have padding before first header). Limit 512 to avoid hang. */
-            constexpr std::size_t kInitialSearchLimit = 512;
+            /* Only at start: skip leading garbage (some images have padding before first header). Match Rust behavior: search all. */
+            bool found = false;
             if (off == 0 && total >= 6) {
-                const std::size_t search_limit = (total - 6 <= kInitialSearchLimit) ? (total - 6) : kInitialSearchLimit;
+                const std::size_t search_limit = total - 6;
                 for (std::size_t i = 0; i <= search_limit; ++i) {
                     if (std::memcmp(p + i, kNewcMagic.data(), 6) == 0) {
                         off = i;
-                        continue; /* retry with off at first 070701 */
+                        found = true;
+                        break; /* retry with off at first 070701 */
                     }
                 }
+            }
+            if (found) {
+                continue;
             }
             LOGE("Invalid cpio magic at offset %zu\n", off);
             return false;
