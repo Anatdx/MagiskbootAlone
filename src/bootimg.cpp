@@ -694,8 +694,16 @@ int unpack(Utf8CStr image, bool skip_decomp, bool hdr) {
     return RETURN_OK;
 }
 
-#define file_align_with(page_size) \
-    write_zero(fd, align_padding(lseek(fd, 0, SEEK_CUR) - off.header, page_size))
+// Safe align: only pad when current >= header to avoid underflow (lseek error or bad offsets).
+static void do_file_align_with(int fd, uint32_t header_off, int page_size) {
+    off_t cur = lseek(fd, 0, SEEK_CUR);
+    if (cur < 0 || static_cast<uint64_t>(cur) < header_off)
+        return;
+    size_t pad = align_padding(static_cast<size_t>(cur - header_off), page_size);
+    write_zero(fd, pad);
+}
+
+#define file_align_with(page_size) do_file_align_with(fd, off.header, (page_size))
 
 #define file_align() file_align_with(boot.hdr->page_size())
 
@@ -705,8 +713,10 @@ constexpr size_t MAX_REASONABLE_BOOT_SIZE = 256 * 1024 * 1024;
 void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     const boot_img boot(src_img.c_str());
     if (boot.map.size() > MAX_REASONABLE_BOOT_SIZE) {
-        fprintf(stderr, "repack: source image size %zu exceeds %zu, refusing (possible corrupted "
-                "or previous-run artifact)\n", boot.map.size(), MAX_REASONABLE_BOOT_SIZE);
+        fprintf(stderr,
+                "repack: source image size %zu exceeds %zu, refusing (possible corrupted "
+                "or previous-run artifact)\n",
+                boot.map.size(), MAX_REASONABLE_BOOT_SIZE);
         return;
     }
     fprintf(stderr, "Repack to boot image: [%s]\n", out_img.c_str());
@@ -786,7 +796,10 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
                 // Pad zeros to make sure the zImage file size does not change
                 // Also ensure the last 4 bytes are the uncompressed vmlinux size
                 uint32_t sz = m.size();
-                write_zero(fd, boot.hdr->kernel_size() - hdr->kernel_size() - sizeof(sz));
+                const uint32_t need = hdr->kernel_size() + sizeof(sz);
+                if (boot.hdr->kernel_size() >= need) {
+                    write_zero(fd, boot.hdr->kernel_size() - need);
+                }
                 xwrite(fd, &sz, sizeof(sz));
             }
 
@@ -948,15 +961,26 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     // (e.g. corrupted/growing file from previous run). Also cap pad amount to WRITE_ZERO_MAX.
     if (!boot.flags[CHROMEOS_FLAG]) {
         off_t current = lseek(fd, 0, SEEK_CUR);
-        if (current > 0 && static_cast<size_t>(current) < boot.map.size()) {
-            size_t pad_sz = boot.map.size() - static_cast<size_t>(current);
+        const size_t map_sz = boot.map.size();
+        fprintf(stderr, "repack: pad check current=%lld map_sz=%zu\n",
+                static_cast<long long>(current), map_sz);
+        fflush(stderr);
+        if (current > 0 && static_cast<size_t>(current) < map_sz) {
+            size_t pad_sz = map_sz - static_cast<size_t>(current);
             if (pad_sz > WRITE_ZERO_MAX) {
-                fprintf(stderr, "repack: refusing to pad %zu bytes (source %zu, cap %zu), possible "
+                fprintf(stderr,
+                        "repack: refusing to pad %zu bytes (source %zu, cap %zu), possible "
                         "corrupted source or previous run artifact\n",
-                        pad_sz, boot.map.size(), WRITE_ZERO_MAX);
+                        pad_sz, map_sz, WRITE_ZERO_MAX);
             } else {
+                fprintf(stderr, "repack: padding %zu bytes\n", pad_sz);
+                fflush(stderr);
                 write_zero(fd, pad_sz);
             }
+        } else {
+            fprintf(stderr, "repack: skip pad (current=%lld %s map_sz=%zu)\n",
+                    static_cast<long long>(current), (current <= 0) ? "<=0" : ">= map_sz", map_sz);
+            fflush(stderr);
         }
     }
 
@@ -964,6 +988,12 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
      * Patch the image
      ******************/
 
+    if (off.tail < off.header) {
+        fprintf(stderr, "repack: invalid layout tail=%u < header=%u\n", off.tail, off.header);
+        delete hdr;
+        close(fd);
+        return;
+    }
     uint32_t aosp_img_size = off.tail - off.header;
 
     off_t file_sz = lseek(fd, 0, SEEK_END);
