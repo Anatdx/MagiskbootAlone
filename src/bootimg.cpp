@@ -750,6 +750,17 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     // Create new image
     int fd = open(out_img.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
 
+    // Pre-allocate to original size (avoids pad subtraction and underflow entirely).
+    // ChromeOS requires post-processing, so skip pre-allocate there.
+    if (!boot.flags[CHROMEOS_FLAG] && boot.map.size() > 0) {
+        if (ftruncate(fd, static_cast<off_t>(boot.map.size())) != 0) {
+            fprintf(stderr, "repack: ftruncate to %zu failed: %s\n", boot.map.size(), strerror(errno));
+            delete hdr;
+            close(fd);
+            return;
+        }
+    }
+
     // Copy non-standard headers
     if (boot.flags[DHTB_FLAG]) {
         xwrite(fd, boot.map.data(), sizeof(dhtb_hdr));
@@ -956,33 +967,8 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
         xwrite(fd, boot.vbmeta, vbmeta_size);
     }
 
-    // Pad image to original size if not chromeos (as it requires post processing)
-    // Sanity: boot images are typically 32-128MB; refuse to pad if source is suspiciously large
-    // (e.g. corrupted/growing file from previous run). Also cap pad amount to WRITE_ZERO_MAX.
-    if (!boot.flags[CHROMEOS_FLAG]) {
-        off_t current = lseek(fd, 0, SEEK_CUR);
-        const size_t map_sz = boot.map.size();
-        fprintf(stderr, "repack: pad check current=%lld map_sz=%zu\n",
-                static_cast<long long>(current), map_sz);
-        fflush(stderr);
-        if (current > 0 && static_cast<size_t>(current) < map_sz) {
-            size_t pad_sz = map_sz - static_cast<size_t>(current);
-            if (pad_sz > WRITE_ZERO_MAX) {
-                fprintf(stderr,
-                        "repack: refusing to pad %zu bytes (source %zu, cap %zu), possible "
-                        "corrupted source or previous run artifact\n",
-                        pad_sz, map_sz, WRITE_ZERO_MAX);
-            } else {
-                fprintf(stderr, "repack: padding %zu bytes\n", pad_sz);
-                fflush(stderr);
-                write_zero(fd, pad_sz);
-            }
-        } else {
-            fprintf(stderr, "repack: skip pad (current=%lld %s map_sz=%zu)\n",
-                    static_cast<long long>(current), (current <= 0) ? "<=0" : ">= map_sz", map_sz);
-            fflush(stderr);
-        }
-    }
+    // Pad step removed: we pre-allocate to boot.map.size() at open, so no write_zero needed.
+    // This avoids pad subtraction underflow entirely.
 
     /******************
      * Patch the image
