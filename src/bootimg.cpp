@@ -938,8 +938,8 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     // Pad image to original size if not chromeos (as it requires post processing)
     if (!boot.flags[CHROMEOS_FLAG]) {
         off_t current = lseek(fd, 0, SEEK_CUR);
-        if (current < boot.map.size()) {
-            write_zero(fd, boot.map.size() - current);
+        if (current > 0 && static_cast<size_t>(current) < boot.map.size()) {
+            write_zero(fd, boot.map.size() - static_cast<size_t>(current));
         }
     }
 

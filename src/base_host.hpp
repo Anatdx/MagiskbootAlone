@@ -151,8 +151,16 @@ inline int xmkdirs(const char *pathname, mode_t mode) {
 
 } // extern "C"
 
-// write_zero: write `size` zero bytes to fd
+// write_zero: write `size` zero bytes to fd.
+// Cap at 128MB to prevent runaway from overflow/underflow bugs (e.g. cache explosion).
+constexpr std::size_t WRITE_ZERO_MAX = 128 * 1024 * 1024;
+
 inline void write_zero(int fd, std::size_t size) {
+    if (size > WRITE_ZERO_MAX) {
+        fprintf(stderr, "write_zero: refusing to write %zu bytes (cap %zu), possible bug\n",
+                size, WRITE_ZERO_MAX);
+        return;
+    }
     std::vector<char> buf(65536, 0);
     while (size > 0) {
         std::size_t n = size < buf.size() ? size : buf.size();
