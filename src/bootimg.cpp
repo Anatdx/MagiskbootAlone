@@ -699,8 +699,16 @@ int unpack(Utf8CStr image, bool skip_decomp, bool hdr) {
 
 #define file_align() file_align_with(boot.hdr->page_size())
 
+// Boot images are typically 32-128MB; refuse if source is suspiciously large (corrupted/artifact)
+constexpr size_t MAX_REASONABLE_BOOT_SIZE = 256 * 1024 * 1024;
+
 void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     const boot_img boot(src_img.c_str());
+    if (boot.map.size() > MAX_REASONABLE_BOOT_SIZE) {
+        fprintf(stderr, "repack: source image size %zu exceeds %zu, refusing (possible corrupted "
+                "or previous-run artifact)\n", boot.map.size(), MAX_REASONABLE_BOOT_SIZE);
+        return;
+    }
     fprintf(stderr, "Repack to boot image: [%s]\n", out_img.c_str());
 
     struct {
@@ -936,10 +944,19 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     }
 
     // Pad image to original size if not chromeos (as it requires post processing)
+    // Sanity: boot images are typically 32-128MB; refuse to pad if source is suspiciously large
+    // (e.g. corrupted/growing file from previous run). Also cap pad amount to WRITE_ZERO_MAX.
     if (!boot.flags[CHROMEOS_FLAG]) {
         off_t current = lseek(fd, 0, SEEK_CUR);
         if (current > 0 && static_cast<size_t>(current) < boot.map.size()) {
-            write_zero(fd, boot.map.size() - static_cast<size_t>(current));
+            size_t pad_sz = boot.map.size() - static_cast<size_t>(current);
+            if (pad_sz > WRITE_ZERO_MAX) {
+                fprintf(stderr, "repack: refusing to pad %zu bytes (source %zu, cap %zu), possible "
+                        "corrupted source or previous run artifact\n",
+                        pad_sz, boot.map.size(), WRITE_ZERO_MAX);
+            } else {
+                write_zero(fd, pad_sz);
+            }
         }
     }
 
