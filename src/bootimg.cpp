@@ -695,19 +695,22 @@ int unpack(Utf8CStr image, bool skip_decomp, bool hdr) {
 }
 
 // Safe align: only pad when current >= header to avoid underflow (lseek error or bad offsets).
-static void do_file_align_with(int fd, uint32_t header_off, int page_size) {
+// When pre_allocated, skip write_zero and just lseek—the file is already the right size.
+static void do_file_align_with(int fd, uint32_t header_off, int page_size, bool pre_allocated) {
     off_t cur = lseek(fd, 0, SEEK_CUR);
     if (cur < 0 || static_cast<uint64_t>(cur) < header_off)
         return;
     size_t pad = align_padding(static_cast<size_t>(cur - header_off), page_size);
     if (pad > 0) {
-        fprintf(stderr, "file_align: cur=%lld header=%u pad=%zu\n", (long long)cur, header_off, pad);
-        fflush(stderr);
+        if (pre_allocated) {
+            lseek(fd, static_cast<off_t>(pad), SEEK_CUR);
+        } else {
+            write_zero(fd, pad);
+        }
     }
-    write_zero(fd, pad);
 }
 
-#define file_align_with(page_size) do_file_align_with(fd, off.header, (page_size))
+#define file_align_with(page_size) do_file_align_with(fd, off.header, (page_size), pre_allocated)
 
 #define file_align() file_align_with(boot.hdr->page_size())
 
@@ -756,7 +759,9 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     int fd = open(out_img.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
 
     // Pre-allocate to original size (avoids pad subtraction and underflow entirely).
+    // When pre_allocated, file_align uses lseek instead of write_zero.
     // ChromeOS requires post-processing, so skip pre-allocate there.
+    bool pre_allocated = false;
     if (!boot.flags[CHROMEOS_FLAG] && boot.map.size() > 0) {
         if (ftruncate(fd, static_cast<off_t>(boot.map.size())) != 0) {
             fprintf(stderr, "repack: ftruncate to %zu failed: %s\n", boot.map.size(), strerror(errno));
@@ -764,6 +769,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
             close(fd);
             return;
         }
+        pre_allocated = true;
         off_t sz = lseek(fd, 0, SEEK_END);
         fprintf(stderr, "repack: pre-allocated %zu, lseek(END)=%lld\n", boot.map.size(),
                 static_cast<long long>(sz));

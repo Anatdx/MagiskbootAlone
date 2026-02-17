@@ -89,9 +89,19 @@ inline int xopenat(int dirfd, const char *pathname, int flags, mode_t mode = 0) 
 }
 
 inline ssize_t xwrite(int fd, const void *buf, size_t count) {
-    ssize_t n = ::write(fd, buf, count);
-    if (n < 0) PLOGE("write");
-    return n;
+    const char *p = static_cast<const char *>(buf);
+    size_t remaining = count;
+    while (remaining > 0) {
+        ssize_t n = ::write(fd, p, remaining);
+        if (n < 0) {
+            PLOGE("write");
+            return -1;
+        }
+        if (n == 0) break;  // EOF on some fd types
+        p += static_cast<size_t>(n);
+        remaining -= static_cast<size_t>(n);
+    }
+    return static_cast<ssize_t>(count - remaining);
 }
 
 inline ssize_t xsendfile(int out_fd, int in_fd, off_t *offset, size_t count) {
@@ -156,10 +166,6 @@ inline int xmkdirs(const char *pathname, mode_t mode) {
 constexpr std::size_t WRITE_ZERO_MAX = 128 * 1024 * 1024;
 
 inline void write_zero(int fd, std::size_t size) {
-    if (size > 0) {
-        fprintf(stderr, "write_zero: size=%zu\n", size);
-        fflush(stderr);
-    }
     if (size > WRITE_ZERO_MAX) {
         fprintf(stderr, "write_zero: refusing to write %zu bytes (cap %zu), possible bug\n",
                 size, WRITE_ZERO_MAX);
@@ -168,8 +174,8 @@ inline void write_zero(int fd, std::size_t size) {
     std::vector<char> buf(65536, 0);
     while (size > 0) {
         std::size_t n = size < buf.size() ? size : buf.size();
-        if (xwrite(fd, buf.data(), n) != static_cast<ssize_t>(n))
-            return;
+        ssize_t w = xwrite(fd, buf.data(), n);
+        if (w != static_cast<ssize_t>(n)) return;
         size -= n;
     }
 }
