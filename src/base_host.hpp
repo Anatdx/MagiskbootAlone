@@ -156,6 +156,7 @@ inline int xmkdirs(const char *pathname, mode_t mode) {
 constexpr std::size_t WRITE_ZERO_MAX = 128 * 1024 * 1024;
 
 inline void write_zero(int fd, std::size_t size) {
+    if (size > 0) fprintf(stderr, "write_zero: size=%zu\n", size);
     if (size > WRITE_ZERO_MAX) {
         fprintf(stderr, "write_zero: refusing to write %zu bytes (cap %zu), possible bug\n",
                 size, WRITE_ZERO_MAX);

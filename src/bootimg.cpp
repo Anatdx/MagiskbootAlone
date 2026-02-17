@@ -700,6 +700,7 @@ static void do_file_align_with(int fd, uint32_t header_off, int page_size) {
     if (cur < 0 || static_cast<uint64_t>(cur) < header_off)
         return;
     size_t pad = align_padding(static_cast<size_t>(cur - header_off), page_size);
+    if (pad > 0) fprintf(stderr, "file_align: cur=%lld header=%u pad=%zu\n", (long long)cur, header_off, pad);
     write_zero(fd, pad);
 }
 
@@ -719,7 +720,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
                 boot.map.size(), MAX_REASONABLE_BOOT_SIZE);
         return;
     }
-    fprintf(stderr, "Repack to boot image: [%s]\n", out_img.c_str());
+    fprintf(stderr, "Repack to boot image: [%s], src_size=%zu\n", out_img.c_str(), boot.map.size());
 
     struct {
         uint32_t header;
@@ -778,6 +779,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     // kernel
     off.kernel = lseek(fd, 0, SEEK_CUR);
+    fprintf(stderr, "repack: writing kernel at %u\n", off.kernel);
     if (boot.flags[MTK_KERNEL]) {
         // Copy MTK headers
         xwrite(fd, boot.k_hdr, sizeof(mtk_hdr));
@@ -835,6 +837,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     // ramdisk
     off.ramdisk = lseek(fd, 0, SEEK_CUR);
+    fprintf(stderr, "repack: writing ramdisk at %u\n", off.ramdisk);
     if (boot.flags[MTK_RAMDISK]) {
         // Copy MTK headers
         xwrite(fd, boot.r_hdr, sizeof(mtk_hdr));
@@ -894,6 +897,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     // second
     off.second = lseek(fd, 0, SEEK_CUR);
+    fprintf(stderr, "repack: writing second at %u\n", off.second);
     if (access(SECOND_FILE, R_OK) == 0) {
         hdr->set_second_size(restore(fd, SECOND_FILE));
         file_align();
@@ -921,6 +925,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     // dtb
     off.dtb = lseek(fd, 0, SEEK_CUR);
+    fprintf(stderr, "repack: writing dtb at %u\n", off.dtb);
     if (access(DTB_FILE, R_OK) == 0) {
         hdr->set_dtb_size(restore(fd, DTB_FILE));
         file_align();
