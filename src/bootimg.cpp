@@ -700,7 +700,10 @@ static void do_file_align_with(int fd, uint32_t header_off, int page_size) {
     if (cur < 0 || static_cast<uint64_t>(cur) < header_off)
         return;
     size_t pad = align_padding(static_cast<size_t>(cur - header_off), page_size);
-    if (pad > 0) fprintf(stderr, "file_align: cur=%lld header=%u pad=%zu\n", (long long)cur, header_off, pad);
+    if (pad > 0) {
+        fprintf(stderr, "file_align: cur=%lld header=%u pad=%zu\n", (long long)cur, header_off, pad);
+        fflush(stderr);
+    }
     write_zero(fd, pad);
 }
 
@@ -721,6 +724,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
         return;
     }
     fprintf(stderr, "Repack to boot image: [%s], src_size=%zu\n", out_img.c_str(), boot.map.size());
+    fflush(stderr);
 
     struct {
         uint32_t header;
@@ -760,6 +764,11 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
             close(fd);
             return;
         }
+        off_t sz = lseek(fd, 0, SEEK_END);
+        fprintf(stderr, "repack: pre-allocated %zu, lseek(END)=%lld\n", boot.map.size(),
+                static_cast<long long>(sz));
+        fflush(stderr);
+        lseek(fd, 0, SEEK_SET);
     }
 
     // Copy non-standard headers
@@ -780,6 +789,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     // kernel
     off.kernel = lseek(fd, 0, SEEK_CUR);
     fprintf(stderr, "repack: writing kernel at %u\n", off.kernel);
+    fflush(stderr);
     if (boot.flags[MTK_KERNEL]) {
         // Copy MTK headers
         xwrite(fd, boot.k_hdr, sizeof(mtk_hdr));
@@ -838,6 +848,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     // ramdisk
     off.ramdisk = lseek(fd, 0, SEEK_CUR);
     fprintf(stderr, "repack: writing ramdisk at %u\n", off.ramdisk);
+    fflush(stderr);
     if (boot.flags[MTK_RAMDISK]) {
         // Copy MTK headers
         xwrite(fd, boot.r_hdr, sizeof(mtk_hdr));
@@ -898,6 +909,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     // second
     off.second = lseek(fd, 0, SEEK_CUR);
     fprintf(stderr, "repack: writing second at %u\n", off.second);
+    fflush(stderr);
     if (access(SECOND_FILE, R_OK) == 0) {
         hdr->set_second_size(restore(fd, SECOND_FILE));
         file_align();
@@ -905,6 +917,8 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     // extra
     off.extra = lseek(fd, 0, SEEK_CUR);
+    fprintf(stderr, "repack: writing extra at %u\n", off.extra);
+    fflush(stderr);
     if (access(EXTRA_FILE, R_OK) == 0) {
         mmap_data m(EXTRA_FILE);
         if (!skip_comp && !fmt_compressed_any(check_fmt(m.data(), m.size())) &&
@@ -917,6 +931,8 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     }
 
     // recovery_dtbo
+    fprintf(stderr, "repack: checking recovery_dtbo\n");
+    fflush(stderr);
     if (access(RECV_DTBO_FILE, R_OK) == 0) {
         hdr->set_recovery_dtbo_offset(lseek(fd, 0, SEEK_CUR));
         hdr->set_recovery_dtbo_size(restore(fd, RECV_DTBO_FILE));
@@ -926,6 +942,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     // dtb
     off.dtb = lseek(fd, 0, SEEK_CUR);
     fprintf(stderr, "repack: writing dtb at %u\n", off.dtb);
+    fflush(stderr);
     if (access(DTB_FILE, R_OK) == 0) {
         hdr->set_dtb_size(restore(fd, DTB_FILE));
         file_align();
@@ -933,18 +950,24 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     // Copy boot signature
     if (boot.hdr->signature_size()) {
+        fprintf(stderr, "repack: writing signature\n");
+        fflush(stderr);
         xwrite(fd, boot.signature, boot.hdr->signature_size());
         file_align();
     }
 
     // vendor ramdisk table
     if (!ramdisk_table.empty()) {
+        fprintf(stderr, "repack: writing vendor ramdisk table\n");
+        fflush(stderr);
         xwrite(fd, ramdisk_table.data(), sizeof(*ramdisk_table.data()) * ramdisk_table.size());
         file_align();
     }
 
     // bootconfig
     if (access(BOOTCONFIG_FILE, R_OK) == 0) {
+        fprintf(stderr, "repack: writing bootconfig\n");
+        fflush(stderr);
         hdr->set_bootconfig_size(restore(fd, BOOTCONFIG_FILE));
         file_align();
     }
@@ -960,6 +983,8 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     }
 
     off.tail = lseek(fd, 0, SEEK_CUR);
+    fprintf(stderr, "repack: tail at %u\n", off.tail);
+    fflush(stderr);
     file_align();
 
     // vbmeta
@@ -968,6 +993,8 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
         // (which boot images are not), the default block size is 4096
         file_align_with(4096);
         off.vbmeta = lseek(fd, 0, SEEK_CUR);
+        fprintf(stderr, "repack: writing vbmeta at %u\n", off.vbmeta);
+        fflush(stderr);
         uint64_t vbmeta_size = __builtin_bswap64(boot.avb_footer->vbmeta_size);
         xwrite(fd, boot.vbmeta, vbmeta_size);
     }
@@ -978,6 +1005,16 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     /******************
      * Patch the image
      ******************/
+
+    off_t actual_sz = lseek(fd, 0, SEEK_END);
+    fprintf(stderr, "repack: patch start tail=%u header=%u actual_file_sz=%lld map_sz=%zu\n",
+            off.tail, off.header, static_cast<long long>(actual_sz), boot.map.size());
+    fflush(stderr);
+    if (static_cast<size_t>(actual_sz) > boot.map.size()) {
+        fprintf(stderr, "repack: WARNING file grew past pre-alloc! actual=%lld expected=%zu\n",
+                static_cast<long long>(actual_sz), boot.map.size());
+        fflush(stderr);
+    }
 
     if (off.tail < off.header) {
         fprintf(stderr, "repack: invalid layout tail=%u < header=%u\n", off.tail, off.header);
