@@ -26,14 +26,14 @@
 // Minimal host-side base utilities adapted from Magisk `base.hpp`,
 // but without any Rust or Android-specific dependencies.
 
-// Logging helpers – route everything to stderr.
+// Logging helpers – user-facing output to stdout so UI/scripts can capture it.
 inline void LOGD(const char *fmt, ...) {
 #ifdef NDEBUG
     (void)fmt;
 #else
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    vfprintf(stdout, fmt, ap);
     va_end(ap);
 #endif
 }
@@ -41,21 +41,21 @@ inline void LOGD(const char *fmt, ...) {
 inline void LOGI(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    vfprintf(stdout, fmt, ap);
     va_end(ap);
 }
 
 inline void LOGW(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    vfprintf(stdout, fmt, ap);
     va_end(ap);
 }
 
 inline void LOGE(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    vfprintf(stdout, fmt, ap);
     va_end(ap);
 }
 

@@ -2,6 +2,8 @@
 #include <memory>
 #include <string_view>
 #include <vector>
+#include <cstdlib>
+#include <cstdio>
 
 #include "base_host.hpp"
 #include "boot_crypto.hpp"
@@ -13,6 +15,15 @@ using namespace std;
 #define PADDING 15
 #define SHA256_DIGEST_SIZE 32
 #define SHA_DIGEST_SIZE 20
+
+#define RETURN_OK 0
+
+namespace {
+/** When YUKISU_BOOT_INFO_STDOUT is set, boot info goes to stdout for user/manager; else stderr. */
+FILE* boot_info_stream() {
+    return (std::getenv("YUKISU_BOOT_INFO_STDOUT") != nullptr) ? stdout : stderr;
+}
+}  // namespace
 
 #define RETURN_OK 0
 #define RETURN_ERROR 1
@@ -107,21 +118,22 @@ FileFormat check_fmt(const void* buf, size_t len) {
 }
 
 void dyn_img_hdr::print() const {
+    FILE* out = boot_info_stream();
     uint32_t ver = header_version();
-    fprintf(stderr, "%-*s [%u]\n", PADDING, "HEADER_VER", ver);
+    fprintf(out, "%-*s [%u]\n", PADDING, "HEADER_VER", ver);
     if (!is_vendor())
-        fprintf(stderr, "%-*s [%u]\n", PADDING, "KERNEL_SZ", kernel_size());
-    fprintf(stderr, "%-*s [%u]\n", PADDING, "RAMDISK_SZ", ramdisk_size());
+        fprintf(out, "%-*s [%u]\n", PADDING, "KERNEL_SZ", kernel_size());
+    fprintf(out, "%-*s [%u]\n", PADDING, "RAMDISK_SZ", ramdisk_size());
     if (ver < 3)
-        fprintf(stderr, "%-*s [%u]\n", PADDING, "SECOND_SZ", second_size());
+        fprintf(out, "%-*s [%u]\n", PADDING, "SECOND_SZ", second_size());
     if (ver == 0)
-        fprintf(stderr, "%-*s [%u]\n", PADDING, "EXTRA_SZ", extra_size());
+        fprintf(out, "%-*s [%u]\n", PADDING, "EXTRA_SZ", extra_size());
     if (ver == 1 || ver == 2)
-        fprintf(stderr, "%-*s [%u]\n", PADDING, "RECOV_DTBO_SZ", recovery_dtbo_size());
+        fprintf(out, "%-*s [%u]\n", PADDING, "RECOV_DTBO_SZ", recovery_dtbo_size());
     if (ver == 2 || is_vendor())
-        fprintf(stderr, "%-*s [%u]\n", PADDING, "DTB_SZ", dtb_size());
+        fprintf(out, "%-*s [%u]\n", PADDING, "DTB_SZ", dtb_size());
     if (ver == 4 && is_vendor())
-        fprintf(stderr, "%-*s [%u]\n", PADDING, "BOOTCONFIG_SZ", bootconfig_size());
+        fprintf(out, "%-*s [%u]\n", PADDING, "BOOTCONFIG_SZ", bootconfig_size());
 
     if (uint32_t os_ver = os_version()) {
         int a, b, c, y, m = 0;
@@ -131,24 +143,24 @@ void dyn_img_hdr::print() const {
         a = (version >> 14) & 0x7f;
         b = (version >> 7) & 0x7f;
         c = version & 0x7f;
-        fprintf(stderr, "%-*s [%d.%d.%d]\n", PADDING, "OS_VERSION", a, b, c);
+        fprintf(out, "%-*s [%d.%d.%d]\n", PADDING, "OS_VERSION", a, b, c);
 
         y = (patch_level >> 4) + 2000;
         m = patch_level & 0xf;
-        fprintf(stderr, "%-*s [%d-%02d]\n", PADDING, "OS_PATCH_LEVEL", y, m);
+        fprintf(out, "%-*s [%d-%02d]\n", PADDING, "OS_PATCH_LEVEL", y, m);
     }
 
-    fprintf(stderr, "%-*s [%u]\n", PADDING, "PAGESIZE", page_size());
+    fprintf(out, "%-*s [%u]\n", PADDING, "PAGESIZE", page_size());
     if (const char* n = name()) {
-        fprintf(stderr, "%-*s [%s]\n", PADDING, "NAME", n);
+        fprintf(out, "%-*s [%s]\n", PADDING, "NAME", n);
     }
-    fprintf(stderr, "%-*s [%.*s%.*s]\n", PADDING, "CMDLINE", static_cast<int>(BOOT_ARGS_SIZE),
+    fprintf(out, "%-*s [%.*s%.*s]\n", PADDING, "CMDLINE", static_cast<int>(BOOT_ARGS_SIZE),
             cmdline(), static_cast<int>(BOOT_EXTRA_ARGS_SIZE), extra_cmdline());
     if (const char* checksum = id()) {
-        fprintf(stderr, "%-*s [", PADDING, "CHECKSUM");
+        fprintf(out, "%-*s [", PADDING, "CHECKSUM");
         for (int i = 0; i < SHA256_DIGEST_SIZE; ++i)
-            fprintf(stderr, "%02hhx", checksum[i]);
-        fprintf(stderr, "]\n");
+            fprintf(out, "%02hhx", checksum[i]);
+        fprintf(out, "]\n");
     }
 }
 
@@ -214,7 +226,7 @@ boot_img::boot_img(const char* image)
       k_fmt(FileFormat::UNKNOWN),
       r_fmt(FileFormat::UNKNOWN),
       e_fmt(FileFormat::UNKNOWN) {
-    fprintf(stderr, "Parsing boot image: [%s]\n", image);
+    fprintf(stdout, "Parsing boot image: [%s]\n", image);
     for (const uint8_t* addr = map.data(); addr < map.data() + map.size(); ++addr) {
         FileFormat fmt = check_fmt(addr, map.size() - (addr - map.data()));
         switch (fmt) {
@@ -225,12 +237,12 @@ boot_img::boot_img(const char* image)
         case FileFormat::DHTB:
             flags[DHTB_FLAG] = true;
             flags[SEANDROID_FLAG] = true;
-            fprintf(stderr, "DHTB_HDR\n");
+            fprintf(stdout, "DHTB_HDR\n");
             addr += sizeof(dhtb_hdr) - 1;
             break;
         case FileFormat::BLOB:
             flags[BLOB_FLAG] = true;
-            fprintf(stderr, "TEGRA_BLOB\n");
+            fprintf(stdout, "TEGRA_BLOB\n");
             addr += sizeof(blob_hdr) - 1;
             break;
         case FileFormat::AOSP:
@@ -327,7 +339,7 @@ static FileFormat check_fmt_lg(const uint8_t* buf, unsigned sz) {
 
 const uint8_t* boot_img::parse_hdr(const uint8_t* addr, FileFormat type) {
     if (type == FileFormat::AOSP_VENDOR) {
-        fprintf(stderr, "VENDOR_BOOT_HDR\n");
+        fprintf(stdout, "VENDOR_BOOT_HDR\n");
         auto h = reinterpret_cast<const boot_img_hdr_vnd_v3*>(addr);
         switch (h->header_version) {
         case 4:
@@ -343,7 +355,7 @@ const uint8_t* boot_img::parse_hdr(const uint8_t* addr, FileFormat type) {
     auto h = reinterpret_cast<const boot_img_hdr_v0*>(addr);
 
     if (h->page_size >= 0x02000000) {
-        fprintf(stderr, "PXA_BOOT_HDR\n");
+        fprintf(stdout, "PXA_BOOT_HDR\n");
         hdr = new dyn_img_pxa(addr);
         return addr;
     }
@@ -370,7 +382,7 @@ const uint8_t* boot_img::parse_hdr(const uint8_t* addr, FileFormat type) {
     if (BUFFER_CONTAIN(addr, AMONET_MICROLOADER_SZ, AMONET_MICROLOADER_MAGIC) &&
         BUFFER_MATCH(addr + AMONET_MICROLOADER_SZ, BOOT_MAGIC)) {
         flags[AMONET_FLAG] = true;
-        fprintf(stderr, "AMONET_MICROLOADER\n");
+        fprintf(stdout, "AMONET_MICROLOADER\n");
 
         h = reinterpret_cast<const boot_img_hdr_v0*>(addr + AMONET_MICROLOADER_SZ);
         auto real_hdr_sz = h->page_size - AMONET_MICROLOADER_SZ;
@@ -381,11 +393,11 @@ const uint8_t* boot_img::parse_hdr(const uint8_t* addr, FileFormat type) {
     if (CMD_MATCH(NOOKHD_RL_MAGIC) || CMD_MATCH(NOOKHD_GL_MAGIC) || CMD_MATCH(NOOKHD_GR_MAGIC) ||
         CMD_MATCH(NOOKHD_EB_MAGIC) || CMD_MATCH(NOOKHD_ER_MAGIC)) {
         flags[NOOKHD_FLAG] = true;
-        fprintf(stderr, "NOOKHD_LOADER\n");
+        fprintf(stdout, "NOOKHD_LOADER\n");
         addr += NOOKHD_PRE_HEADER_SZ;
     } else if (BUFFER_MATCH(h->name.data(), ACCLAIM_MAGIC)) {
         flags[ACCLAIM_FLAG] = true;
-        fprintf(stderr, "ACCLAIM_LOADER\n");
+        fprintf(stdout, "ACCLAIM_LOADER\n");
         addr += ACCLAIM_PRE_HEADER_SZ;
     }
 
@@ -405,7 +417,7 @@ void boot_img::parse_zimage() {
     }
 
     if (piggy != nullptr) {
-        fprintf(stderr, "ZIMAGE_KERNEL\n");
+        fprintf(stdout, "ZIMAGE_KERNEL\n");
         z_info.hdr_sz = piggy - kernel;
 
         uint32_t piggy_size = z_info.hdr->end - z_info.hdr->start;
@@ -420,7 +432,7 @@ void boot_img::parse_zimage() {
         }
 
         if (piggy_end == piggy_size) {
-            fprintf(stderr, "! Could not find end of zImage piggy, keeping raw kernel\n");
+            fprintf(stdout, "! Could not find end of zImage piggy, keeping raw kernel\n");
         } else {
             flags[ZIMAGE_KERNEL] = true;
             z_info.tail = byte_view(kernel + piggy_end, hdr->kernel_size() - piggy_end);
@@ -429,7 +441,7 @@ void boot_img::parse_zimage() {
             k_fmt = check_fmt_lg(kernel, hdr->kernel_size());
         }
     } else {
-        fprintf(stderr, "! Could not find zImage piggy, keeping raw kernel\n");
+        fprintf(stdout, "! Could not find zImage piggy, keeping raw kernel\n");
     }
 }
 
@@ -454,7 +466,7 @@ boot_img::vendor_ramdisk_table_view boot_img::vendor_ramdisk_tbl() const {
 
     using table_entry = const vendor_ramdisk_table_entry_v4;
     if (hdr->vendor_ramdisk_table_entry_size() != sizeof(table_entry)) {
-        fprintf(stderr, "! Invalid vendor image: vendor_ramdisk_table_entry_size != %zu\n",
+        fprintf(stdout, "! Invalid vendor image: vendor_ramdisk_table_entry_size != %zu\n",
                 sizeof(table_entry));
         exit(RETURN_ERROR);
     }
@@ -466,7 +478,7 @@ boot_img::vendor_ramdisk_table_view boot_img::vendor_ramdisk_tbl() const {
 
 #define assert_off()                                \
     if ((addr + off) > (map.data() + map_end)) {    \
-        fprintf(stderr, "Corrupted boot image!\n"); \
+        fprintf(stdout, "Corrupted boot image!\n"); \
         return false;                               \
     }
 
@@ -479,7 +491,7 @@ boot_img::vendor_ramdisk_table_view boot_img::vendor_ramdisk_tbl() const {
 bool boot_img::parse_image(const uint8_t* addr, FileFormat type) {
     addr = parse_hdr(addr, type);
     if (hdr == nullptr) {
-        fprintf(stderr, "Invalid boot image header!\n");
+        fprintf(stdout, "Invalid boot image header!\n");
         return false;
     }
 
@@ -514,16 +526,16 @@ bool boot_img::parse_image(const uint8_t* addr, FileFormat type) {
         if (int dtb_off = find_dtb_offset(kernel, size); dtb_off > 0) {
             kernel_dtb = byte_view(kernel + dtb_off, size - dtb_off);
             hdr->set_kernel_size(dtb_off);
-            fprintf(stderr, "%-*s [%zu]\n", PADDING, "KERNEL_DTB_SZ", kernel_dtb.size());
+            fprintf(stdout, "%-*s [%zu]\n", PADDING, "KERNEL_DTB_SZ", kernel_dtb.size());
         }
 
         k_fmt = check_fmt_lg(kernel, hdr->kernel_size());
         if (k_fmt == FileFormat::MTK) {
-            fprintf(stderr, "MTK_KERNEL_HDR\n");
+            fprintf(stdout, "MTK_KERNEL_HDR\n");
             flags[MTK_KERNEL] = true;
             k_hdr = reinterpret_cast<const mtk_hdr*>(kernel);
-            fprintf(stderr, "%-*s [%u]\n", PADDING, "SIZE", k_hdr->size);
-            fprintf(stderr, "%-*s [%s]\n", PADDING, "NAME", k_hdr->name.data());
+            fprintf(stdout, "%-*s [%u]\n", PADDING, "SIZE", k_hdr->size);
+            fprintf(stdout, "%-*s [%s]\n", PADDING, "NAME", k_hdr->name.data());
             kernel += sizeof(mtk_hdr);
             hdr->set_kernel_size(hdr->kernel_size() - sizeof(mtk_hdr));
             k_fmt = check_fmt_lg(kernel, hdr->kernel_size());
@@ -531,46 +543,46 @@ bool boot_img::parse_image(const uint8_t* addr, FileFormat type) {
         if (k_fmt == FileFormat::ZIMAGE) {
             parse_zimage();
         }
-        fprintf(stderr, "%-*s [%s]\n", PADDING, "KERNEL_FMT", fmt2name(k_fmt));
+        fprintf(stdout, "%-*s [%s]\n", PADDING, "KERNEL_FMT", fmt2name(k_fmt));
     }
     if (auto size = hdr->ramdisk_size()) {
         if (hdr->vendor_ramdisk_table_size()) {
             for (auto& it : vendor_ramdisk_tbl()) {
                 FileFormat fmt = check_fmt_lg(ramdisk + it.ramdisk_offset, it.ramdisk_size);
-                fprintf(stderr, "%-*s name=[%s] type=[%s] size=[%u] fmt=[%s]\n", PADDING,
+                fprintf(stdout, "%-*s name=[%s] type=[%s] size=[%u] fmt=[%s]\n", PADDING,
                         "VND_RAMDISK", it.ramdisk_name.data(), vendor_ramdisk_type(it.ramdisk_type),
                         it.ramdisk_size, fmt2name(fmt));
             }
         } else {
             r_fmt = check_fmt_lg(ramdisk, size);
             if (r_fmt == FileFormat::MTK) {
-                fprintf(stderr, "MTK_RAMDISK_HDR\n");
+                fprintf(stdout, "MTK_RAMDISK_HDR\n");
                 flags[MTK_RAMDISK] = true;
                 r_hdr = reinterpret_cast<const mtk_hdr*>(ramdisk);
-                fprintf(stderr, "%-*s [%u]\n", PADDING, "SIZE", r_hdr->size);
-                fprintf(stderr, "%-*s [%s]\n", PADDING, "NAME", r_hdr->name.data());
+                fprintf(stdout, "%-*s [%u]\n", PADDING, "SIZE", r_hdr->size);
+                fprintf(stdout, "%-*s [%s]\n", PADDING, "NAME", r_hdr->name.data());
                 ramdisk += sizeof(mtk_hdr);
                 hdr->set_ramdisk_size(hdr->ramdisk_size() - sizeof(mtk_hdr));
                 r_fmt = check_fmt_lg(ramdisk, hdr->ramdisk_size());
             }
-            fprintf(stderr, "%-*s [%s]\n", PADDING, "RAMDISK_FMT", fmt2name(r_fmt));
+            fprintf(stdout, "%-*s [%s]\n", PADDING, "RAMDISK_FMT", fmt2name(r_fmt));
         }
     }
     if (auto size = hdr->extra_size()) {
         e_fmt = check_fmt_lg(extra, size);
-        fprintf(stderr, "%-*s [%s]\n", PADDING, "EXTRA_FMT", fmt2name(e_fmt));
+        fprintf(stdout, "%-*s [%s]\n", PADDING, "EXTRA_FMT", fmt2name(e_fmt));
     }
 
     if (tail.size()) {
         // Check special flags
         if (tail.size() >= 16 && BUFFER_MATCH(tail.data(), SEANDROID_MAGIC)) {
-            fprintf(stderr, "SAMSUNG_SEANDROID\n");
+            fprintf(stdout, "SAMSUNG_SEANDROID\n");
             flags[SEANDROID_FLAG] = true;
         } else if (tail.size() >= 16 && BUFFER_MATCH(tail.data(), LG_BUMP_MAGIC)) {
-            fprintf(stderr, "LG_BUMP_IMAGE\n");
+            fprintf(stdout, "LG_BUMP_IMAGE\n");
             flags[LG_BUMP_FLAG] = true;
         } else if (verify()) {
-            fprintf(stderr, "AVB1_SIGNED\n");
+            fprintf(stdout, "AVB1_SIGNED\n");
             flags[AVB1_SIGNED_FLAG] = true;
         }
 
@@ -581,7 +593,7 @@ bool boot_img::parse_image(const uint8_t* addr, FileFormat type) {
             // Double check if meta header exists
             const void* meta = payload.data() + __builtin_bswap64(avb_footer->vbmeta_offset);
             if (BUFFER_MATCH(meta, AVB_MAGIC)) {
-                fprintf(stderr, "VBMETA\n");
+                fprintf(stdout, "VBMETA\n");
                 flags[AVB_FLAG] = true;
                 vbmeta = static_cast<const AvbVBMetaImageHeader*>(meta);
             }
@@ -608,7 +620,7 @@ int split_image_dtb(Utf8CStr filename, bool skip_decomp) {
         dump(img.data() + off, img.size() - off, KER_DTB_FILE);
         return 0;
     } else {
-        fprintf(stderr, "Cannot find DTB in %s\n", filename.c_str());
+        fprintf(stdout, "Cannot find DTB in %s\n", filename.c_str());
         return 1;
     }
 }
@@ -720,13 +732,13 @@ constexpr size_t MAX_REASONABLE_BOOT_SIZE = 256 * 1024 * 1024;
 void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     const boot_img boot(src_img.c_str());
     if (boot.map.size() > MAX_REASONABLE_BOOT_SIZE) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "repack: source image size %zu exceeds %zu, refusing (possible corrupted "
                 "or previous-run artifact)\n",
                 boot.map.size(), MAX_REASONABLE_BOOT_SIZE);
         return;
     }
-    fprintf(stderr, "Repack to boot image: [%s], src_size=%zu\n", out_img.c_str(), boot.map.size());
+    fprintf(stdout, "Repack to boot image: [%s], src_size=%zu\n", out_img.c_str(), boot.map.size());
     fflush(stderr);
 
     struct {
@@ -764,14 +776,14 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     bool pre_allocated = false;
     if (!boot.flags[CHROMEOS_FLAG] && boot.map.size() > 0) {
         if (ftruncate(fd, static_cast<off_t>(boot.map.size())) != 0) {
-            fprintf(stderr, "repack: ftruncate to %zu failed: %s\n", boot.map.size(), strerror(errno));
+            fprintf(stdout, "repack: ftruncate to %zu failed: %s\n", boot.map.size(), strerror(errno));
             delete hdr;
             close(fd);
             return;
         }
         pre_allocated = true;
         off_t sz = lseek(fd, 0, SEEK_END);
-        fprintf(stderr, "repack: pre-allocated %zu, lseek(END)=%lld\n", boot.map.size(),
+        fprintf(stdout, "repack: pre-allocated %zu, lseek(END)=%lld\n", boot.map.size(),
                 static_cast<long long>(sz));
         fflush(stderr);
         lseek(fd, 0, SEEK_SET);
@@ -794,7 +806,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     // kernel
     off.kernel = lseek(fd, 0, SEEK_CUR);
-    fprintf(stderr, "repack: writing kernel at %u\n", off.kernel);
+    fprintf(stdout, "repack: writing kernel at %u\n", off.kernel);
     fflush(stderr);
     if (boot.flags[MTK_KERNEL]) {
         // Copy MTK headers
@@ -818,7 +830,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
         if (boot.flags[ZIMAGE_KERNEL]) {
             if (hdr->kernel_size() > boot.hdr->kernel_size()) {
-                fprintf(stderr, "! Recompressed kernel is too large, using original kernel\n");
+                fprintf(stdout, "! Recompressed kernel is too large, using original kernel\n");
                 ftruncate(fd, lseek(fd, -static_cast<off_t>(hdr->kernel_size()), SEEK_CUR));
                 xwrite(fd, boot.kernel, boot.hdr->kernel_size());
             } else if (!skip_comp) {
@@ -853,7 +865,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     // ramdisk
     off.ramdisk = lseek(fd, 0, SEEK_CUR);
-    fprintf(stderr, "repack: writing ramdisk at %u\n", off.ramdisk);
+    fprintf(stdout, "repack: writing ramdisk at %u\n", off.ramdisk);
     fflush(stderr);
     if (boot.flags[MTK_RAMDISK]) {
         // Copy MTK headers
@@ -899,7 +911,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
             // A v4 boot image ramdisk will have to be merged with other vendor ramdisks,
             // and they have to use the exact same compression method. v4 GKIs are required to
             // use lz4 (legacy), so hardcode the format here.
-            fprintf(stderr, "RAMDISK_FMT: [%s] -> [%s]\n", fmt2name(r_fmt),
+            fprintf(stdout, "RAMDISK_FMT: [%s] -> [%s]\n", fmt2name(r_fmt),
                     fmt2name(FileFormat::LZ4_LEGACY));
             r_fmt = FileFormat::LZ4_LEGACY;
         }
@@ -914,7 +926,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     // second
     off.second = lseek(fd, 0, SEEK_CUR);
-    fprintf(stderr, "repack: writing second at %u\n", off.second);
+    fprintf(stdout, "repack: writing second at %u\n", off.second);
     fflush(stderr);
     if (access(SECOND_FILE, R_OK) == 0) {
         hdr->set_second_size(restore(fd, SECOND_FILE));
@@ -923,7 +935,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     // extra
     off.extra = lseek(fd, 0, SEEK_CUR);
-    fprintf(stderr, "repack: writing extra at %u\n", off.extra);
+    fprintf(stdout, "repack: writing extra at %u\n", off.extra);
     fflush(stderr);
     if (access(EXTRA_FILE, R_OK) == 0) {
         mmap_data m(EXTRA_FILE);
@@ -937,7 +949,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     }
 
     // recovery_dtbo
-    fprintf(stderr, "repack: checking recovery_dtbo\n");
+    fprintf(stdout, "repack: checking recovery_dtbo\n");
     fflush(stderr);
     if (access(RECV_DTBO_FILE, R_OK) == 0) {
         hdr->set_recovery_dtbo_offset(lseek(fd, 0, SEEK_CUR));
@@ -947,7 +959,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     // dtb
     off.dtb = lseek(fd, 0, SEEK_CUR);
-    fprintf(stderr, "repack: writing dtb at %u\n", off.dtb);
+    fprintf(stdout, "repack: writing dtb at %u\n", off.dtb);
     fflush(stderr);
     if (access(DTB_FILE, R_OK) == 0) {
         hdr->set_dtb_size(restore(fd, DTB_FILE));
@@ -956,7 +968,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     // Copy boot signature
     if (boot.hdr->signature_size()) {
-        fprintf(stderr, "repack: writing signature\n");
+        fprintf(stdout, "repack: writing signature\n");
         fflush(stderr);
         xwrite(fd, boot.signature, boot.hdr->signature_size());
         file_align();
@@ -964,7 +976,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     // vendor ramdisk table
     if (!ramdisk_table.empty()) {
-        fprintf(stderr, "repack: writing vendor ramdisk table\n");
+        fprintf(stdout, "repack: writing vendor ramdisk table\n");
         fflush(stderr);
         xwrite(fd, ramdisk_table.data(), sizeof(*ramdisk_table.data()) * ramdisk_table.size());
         file_align();
@@ -972,7 +984,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     // bootconfig
     if (access(BOOTCONFIG_FILE, R_OK) == 0) {
-        fprintf(stderr, "repack: writing bootconfig\n");
+        fprintf(stdout, "repack: writing bootconfig\n");
         fflush(stderr);
         hdr->set_bootconfig_size(restore(fd, BOOTCONFIG_FILE));
         file_align();
@@ -989,7 +1001,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     }
 
     off.tail = lseek(fd, 0, SEEK_CUR);
-    fprintf(stderr, "repack: tail at %u\n", off.tail);
+    fprintf(stdout, "repack: tail at %u\n", off.tail);
     fflush(stderr);
     file_align();
 
@@ -999,7 +1011,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
         // (which boot images are not), the default block size is 4096
         file_align_with(4096);
         off.vbmeta = lseek(fd, 0, SEEK_CUR);
-        fprintf(stderr, "repack: writing vbmeta at %u\n", off.vbmeta);
+        fprintf(stdout, "repack: writing vbmeta at %u\n", off.vbmeta);
         fflush(stderr);
         uint64_t vbmeta_size = __builtin_bswap64(boot.avb_footer->vbmeta_size);
         xwrite(fd, boot.vbmeta, vbmeta_size);
@@ -1013,17 +1025,17 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
      ******************/
 
     off_t actual_sz = lseek(fd, 0, SEEK_END);
-    fprintf(stderr, "repack: patch start tail=%u header=%u actual_file_sz=%lld map_sz=%zu\n",
+    fprintf(stdout, "repack: patch start tail=%u header=%u actual_file_sz=%lld map_sz=%zu\n",
             off.tail, off.header, static_cast<long long>(actual_sz), boot.map.size());
     fflush(stderr);
     if (static_cast<size_t>(actual_sz) > boot.map.size()) {
-        fprintf(stderr, "repack: WARNING file grew past pre-alloc! actual=%lld expected=%zu\n",
+        fprintf(stdout, "repack: WARNING file grew past pre-alloc! actual=%lld expected=%zu\n",
                 static_cast<long long>(actual_sz), boot.map.size());
         fflush(stderr);
     }
 
     if (off.tail < off.header) {
-        fprintf(stderr, "repack: invalid layout tail=%u < header=%u\n", off.tail, off.header);
+        fprintf(stdout, "repack: invalid layout tail=%u < header=%u\n", off.tail, off.header);
         delete hdr;
         close(fd);
         return;
@@ -1032,7 +1044,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
 
     off_t file_sz = lseek(fd, 0, SEEK_END);
     if (file_sz <= 0) {
-        fprintf(stderr, "repack: output file size invalid (%lld)\n",
+        fprintf(stdout, "repack: output file size invalid (%lld)\n",
                 static_cast<long long>(file_sz));
         delete hdr;
         close(fd);
@@ -1045,14 +1057,14 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     if (boot.flags[MTK_KERNEL]) {
         mtk_hdr m_hdr;
         if (pread(fd, &m_hdr, sizeof(m_hdr), off.kernel) != static_cast<ssize_t>(sizeof(m_hdr))) {
-            fprintf(stderr, "repack: MTK kernel header read failed\n");
+            fprintf(stdout, "repack: MTK kernel header read failed\n");
             delete hdr;
             close(fd);
             return;
         }
         m_hdr.size = hdr->kernel_size();
         if (pwrite(fd, &m_hdr, sizeof(m_hdr), off.kernel) != static_cast<ssize_t>(sizeof(m_hdr))) {
-            fprintf(stderr, "repack: MTK kernel header write failed\n");
+            fprintf(stdout, "repack: MTK kernel header write failed\n");
             delete hdr;
             close(fd);
             return;
@@ -1062,14 +1074,14 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     if (boot.flags[MTK_RAMDISK]) {
         mtk_hdr m_hdr;
         if (pread(fd, &m_hdr, sizeof(m_hdr), off.ramdisk) != static_cast<ssize_t>(sizeof(m_hdr))) {
-            fprintf(stderr, "repack: MTK ramdisk header read failed\n");
+            fprintf(stdout, "repack: MTK ramdisk header read failed\n");
             delete hdr;
             close(fd);
             return;
         }
         m_hdr.size = hdr->ramdisk_size();
         if (pwrite(fd, &m_hdr, sizeof(m_hdr), off.ramdisk) != static_cast<ssize_t>(sizeof(m_hdr))) {
-            fprintf(stderr, "repack: MTK ramdisk header write failed\n");
+            fprintf(stdout, "repack: MTK ramdisk header write failed\n");
             delete hdr;
             close(fd);
             return;
@@ -1133,13 +1145,13 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     const size_t hdr_off =
         boot.flags[AMONET_FLAG] ? off.header + AMONET_MICROLOADER_SZ : off.header;
     if (hdr_off + hdr_copy_sz > out_sz || !hdr->raw_hdr()) {
-        fprintf(stderr, "repack: header write out of bounds\n");
+        fprintf(stdout, "repack: header write out of bounds\n");
         delete hdr;
         close(fd);
         return;
     }
     if (pwrite(fd, hdr->raw_hdr(), hdr_copy_sz, hdr_off) != static_cast<ssize_t>(hdr_copy_sz)) {
-        fprintf(stderr, "repack: header write failed\n");
+        fprintf(stdout, "repack: header write failed\n");
         delete hdr;
         close(fd);
         return;
@@ -1148,7 +1160,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
     if (boot.flags[AVB_FLAG]) {
         // Copy and patch AVB structures
         if (out_sz < sizeof(AvbFooter)) {
-            fprintf(stderr, "repack: image too small for AVB footer\n");
+            fprintf(stdout, "repack: image too small for AVB footer\n");
             delete hdr;
             close(fd);
             return;
@@ -1159,7 +1171,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
         footer.vbmeta_offset = __builtin_bswap64(off.vbmeta);
         if (pwrite(fd, &footer, sizeof(footer), static_cast<off_t>(out_sz - sizeof(AvbFooter))) !=
             static_cast<ssize_t>(sizeof(footer))) {
-            fprintf(stderr, "repack: AVB footer write failed\n");
+            fprintf(stdout, "repack: AVB footer write failed\n");
             delete hdr;
             close(fd);
             return;
@@ -1185,7 +1197,7 @@ void repack(Utf8CStr src_img, Utf8CStr out_img, bool skip_comp) {
             sha256_hash(byte_view(dhtb_payload.data(), d_hdr.size),
                         byte_data(d_hdr.checksum.data(), SHA256_DIGEST_SIZE));
             if (pwrite(fd, &d_hdr, sizeof(d_hdr), 0) != static_cast<ssize_t>(sizeof(d_hdr))) {
-                fprintf(stderr, "repack: DHTB header write failed\n");
+                fprintf(stdout, "repack: DHTB header write failed\n");
             }
         }
     } else if (boot.flags[BLOB_FLAG]) {
