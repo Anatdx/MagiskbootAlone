@@ -11,6 +11,9 @@
 #include <sstream>
 #include <string_view>
 #include <sys/stat.h>
+#if defined(__linux__) || defined(__ANDROID__)
+#include <sys/sysmacros.h>  /* makedev */
+#endif
 #include <unistd.h>
 
 #include "base_host.hpp"

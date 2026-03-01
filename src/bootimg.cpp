@@ -476,6 +476,60 @@ boot_img::vendor_ramdisk_table_view boot_img::vendor_ramdisk_tbl() const {
     };
 }
 
+bool boot_img::verify(const char *cert_pem_path) const {
+    return avb_verify_boot_signature(tail, payload, cert_pem_path);
+}
+
+int verify_boot_image(const char *img_path, const char *cert_pem_path) {
+    const boot_img boot(img_path);
+    return boot.verify(cert_pem_path) ? 0 : 1;
+}
+
+int sign_boot_image_cmd(const char *img_path, const char *name,
+                        const char *cert_pem_path, const char *key_pem_path) {
+    if (!cert_pem_path || !key_pem_path) {
+        fprintf(stderr, "sign requires x509.pem and pk8 key paths\n");
+        return 1;
+    }
+    const boot_img boot(img_path);
+    std::vector<std::uint8_t> sig =
+        avb_sign_boot_image(boot.payload, name ? name : "/boot", cert_pem_path, key_pem_path);
+    if (sig.empty()) {
+        fprintf(stderr, "sign: failed to produce signature\n");
+        return 1;
+    }
+    int fd = xopen(img_path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0) {
+        fprintf(stderr, "sign: cannot open image for write\n");
+        return 1;
+    }
+    off_t tail_off = static_cast<off_t>(boot.tail_off());
+    if (lseek(fd, tail_off, SEEK_SET) != tail_off) {
+        fprintf(stderr, "sign: seek failed\n");
+        close(fd);
+        return 1;
+    }
+    ssize_t nw = write(fd, sig.data(), sig.size());
+    if (nw != static_cast<ssize_t>(sig.size())) {
+        fprintf(stderr, "sign: write failed\n");
+        close(fd);
+        return 1;
+    }
+    off_t cur = lseek(fd, 0, SEEK_CUR);
+    off_t eof = lseek(fd, 0, SEEK_END);
+    if (eof > cur) {
+        lseek(fd, cur, SEEK_SET);
+        std::vector<char> zeros(4096, 0);
+        for (off_t remain = eof - cur; remain > 0;) {
+            size_t chunk = static_cast<size_t>(std::min(remain, static_cast<off_t>(zeros.size())));
+            if (write(fd, zeros.data(), chunk) != static_cast<ssize_t>(chunk)) break;
+            remain -= chunk;
+        }
+    }
+    close(fd);
+    return 0;
+}
+
 #define assert_off()                                \
     if ((addr + off) > (map.data() + map_end)) {    \
         fprintf(stdout, "Corrupted boot image!\n"); \

@@ -32,8 +32,7 @@ echo "ABI=${ABI}"
 cmake -S . -B "${BUILD_DIR}" \
   -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
   -DANDROID_ABI="${ABI}" \
-  -DANDROID_PLATFORM=android-21 \
-  -DMAGISKBOOT_USE_OPENSSL=OFF
+  -DANDROID_PLATFORM=android-21
 
 cmake --build "${BUILD_DIR}"
 

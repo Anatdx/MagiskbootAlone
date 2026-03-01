@@ -62,6 +62,17 @@ const char *fmt2name(FileFormat fmt);
 bool fmt_compressed(FileFormat fmt);
 bool fmt_compressed_any(FileFormat fmt);
 
-// AVB1 payload signing helper – stub in this standalone version.
+// AVB1 boot image signature (Android BootSignature DER format).
+// Verify: tail = image tail (DER blob), payload = boot payload; cert_pem = optional override.
+bool avb_verify_boot_signature(byte_view tail, byte_view payload,
+                               const char *cert_pem_path = nullptr);
+
+// Sign payload; returns DER-encoded BootSignature or empty on failure.
+// name defaults to "/boot"; cert_pem/key_pem null = use no key (returns empty).
+std::vector<std::uint8_t> avb_sign_boot_image(byte_view payload, const char *name,
+                                              const char *cert_pem_path,
+                                              const char *key_pem_path);
+
+// Legacy single-arg form for repack (no cert/key → returns empty when no default keys).
 std::vector<std::uint8_t> sign_payload(byte_view payload);
 

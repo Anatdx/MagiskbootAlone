@@ -10,14 +10,14 @@ Boot image unpack/repack/split-dtb logic is derived from [Magisk](https://github
 - **Repack** from extracted files with optional recompression
 - **Split DTB** from kernel images that embed device tree
 - **Compression**: GZIP/ZOPFLI (via zlib); optional LZ4/XZ when enabled
-- **Hashing**: SHA-1 / SHA-256 (via OpenSSL) for header checksums
+- **Hashing & AVB**: SHA-1 / SHA-256 and AVB verify/sign via **mbedTLS** (no OpenSSL, no picosha2)
 
 ## Requirements
 
 - CMake ≥ 3.20
 - C++20 compiler (GCC, Clang, or MSVC)
 - **zlib** (required)
-- **OpenSSL** (optional but recommended for SHA-1/SHA-256; disable with `-DMAGISKBOOT_USE_OPENSSL=OFF` if you provide your own implementation)
+- **mbedTLS** (fetched via CMake FetchContent; provides SHA1/SHA256 and X.509/RSA/ECDSA for AVB)
 
 ## Build
 
@@ -25,14 +25,6 @@ Boot image unpack/repack/split-dtb logic is derived from [Magisk](https://github
 
 ```bash
 cmake -S . -B build
-cmake --build build
-```
-
-Optional:
-
-```bash
-# Without OpenSSL (SHA will abort unless you implement it elsewhere)
-cmake -S . -B build -DMAGISKBOOT_USE_OPENSSL=OFF
 cmake --build build
 ```
 
@@ -58,12 +50,11 @@ cmake -S . -B build_android \
   -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
   -DANDROID_ABI=arm64-v8a \
   -DANDROID_PLATFORM=android-21 \
-  -DMAGISKBOOT_USE_OPENSSL=OFF
 cmake --build build_android
 ```
 
 产物：`build_android/magiskboot`，推送到设备后可直接运行（例如 `adb push build_android/magiskboot /data/local/tmp && adb shell /data/local/tmp/magiskboot unpack boot.img`）。  
-Android 构建默认关闭 OpenSSL（设备上一般不预装）；若需要 SHA，可自行提供 OpenSSL 预编译库并打开 `MAGISKBOOT_USE_OPENSSL`。
+Android 构建使用 mbedTLS（FetchContent），无需预装 OpenSSL。
 
 ## Usage
 

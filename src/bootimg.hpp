@@ -503,6 +503,9 @@ struct boot_img {
     const uint8_t *parse_hdr(const uint8_t *addr, FileFormat type);
     vendor_ramdisk_table_view vendor_ramdisk_tbl() const;
 
-    // AVB1 verify stub: upstream implements in Rust; we return false (no AVB1 detection)
-    bool verify() const noexcept { return false; }
+    // AVB1 verify: true if tail contains valid BootSignature and verifies with optional cert.
+    bool verify(const char *cert_pem_path = nullptr) const;
+
+    // File offset at which tail (signature) starts; for repack/sign.
+    size_t tail_off() const noexcept { return payload.size(); }
 };

@@ -5,8 +5,7 @@ project(magiskboot_alone LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-option(MAGISKBOOT_USE_OPENSSL "Use OpenSSL for SHA1/SHA256" ON)
-
+# Crypto: mbedTLS only (SHA1/SHA256 + AVB verify/sign). No OpenSSL, no picosha2.
 # LZ4: Android uses Magisk's LZ4 (git clone in CMake) for identical ABI/behavior as Magisk magiskboot.
 # Host can use vendored external/lz4 or upstream lz4.
 set(LZ4_VENDORED "${CMAKE_CURRENT_SOURCE_DIR}/external/lz4")
@@ -91,9 +90,20 @@ if(NOT (LZMA_LIB AND HAVE_LZMA_H))
   endif()
 endif()
 
-if(MAGISKBOOT_USE_OPENSSL)
-  find_package(OpenSSL REQUIRED)
-endif()
+# mbedTLS: SHA1/SHA256 + X.509/RSA/ECDSA for AVB verify & sign
+include(FetchContent)
+set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
+FetchContent_Declare(
+  mbedtls
+  GIT_REPOSITORY https://github.com/Mbed-TLS/mbedtls.git
+  GIT_TAG v3.6.2
+  GIT_SHALLOW TRUE
+  GIT_SUBMODULES "framework"
+)
+FetchContent_MakeAvailable(mbedtls)
+message(STATUS "magiskboot: using mbedTLS for SHA and AVB")
 
 add_executable(magiskboot
   src/base_host.cpp
@@ -133,8 +143,7 @@ else()
   message(WARNING "magiskboot: liblzma not found; XZ support disabled")
 endif()
 
-if(MAGISKBOOT_USE_OPENSSL)
-  target_link_libraries(magiskboot PRIVATE OpenSSL::Crypto)
-  target_compile_definitions(magiskboot PRIVATE USE_OPENSSL_SHA=1)
-endif()
+target_link_libraries(magiskboot PRIVATE mbedx509 mbedcrypto)
+target_compile_definitions(magiskboot PRIVATE USE_MBEDTLS=1)
+target_include_directories(magiskboot PRIVATE ${mbedtls_SOURCE_DIR}/include)
 

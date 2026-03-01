@@ -10,44 +10,63 @@
 #ifdef USE_LIBLZMA
 #include <lzma.h>
 #endif
-#ifdef USE_OPENSSL_SHA
-#include <openssl/sha.h>
+#ifdef USE_MBEDTLS
+#include <mbedtls/sha1.h>
+#include <mbedtls/sha256.h>
+#include <mbedtls/x509_crt.h>
+#include <mbedtls/pk.h>
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/entropy.h>
 #endif
 
 #include "base_host.hpp"
 #include "boot_crypto.hpp"
 
 // ===========================
-// SHA‑1 / SHA‑256 via external lib (OpenSSL if enabled)
+// SHA‑1 / SHA‑256: mbedTLS
 // ===========================
 
+#ifdef USE_MBEDTLS
+namespace {
+
+constexpr std::size_t SHA1_DIGEST_LEN = 20;
+constexpr std::size_t SHA256_DIGEST_LEN = 32;
+
+struct Sha1Holder { mbedtls_sha1_context ctx; };
+struct Sha256Holder { mbedtls_sha256_context ctx; };
+
+}  // namespace
+#endif
+
 SHA::SHA(Algorithm algo) : alg_(algo), ctx_(nullptr) {
-#ifdef USE_OPENSSL_SHA
+#ifdef USE_MBEDTLS
     if (alg_ == Algorithm::SHA256) {
-        auto *c = new SHA256_CTX;
-        SHA256_Init(c);
-        ctx_ = c;
+        auto* h = new Sha256Holder;
+        mbedtls_sha256_init(&h->ctx);
+        mbedtls_sha256_starts(&h->ctx, 0);  // 0 = SHA-256
+        ctx_ = h;
     } else {
-        auto *c = new SHA_CTX;
-        SHA1_Init(c);
-        ctx_ = c;
+        auto* h = new Sha1Holder;
+        mbedtls_sha1_init(&h->ctx);
+        mbedtls_sha1_starts(&h->ctx);
+        ctx_ = h;
     }
 #else
     (void)alg_;
-    LOGE("SHA context not backed by any external implementation\n");
+    LOGE("SHA: USE_MBEDTLS required\n");
     std::abort();
 #endif
 }
 
 void SHA::update(byte_view data) {
-#ifdef USE_OPENSSL_SHA
+#ifdef USE_MBEDTLS
     if (!ctx_) return;
     if (alg_ == Algorithm::SHA256) {
-        auto *c = static_cast<SHA256_CTX *>(ctx_);
-        SHA256_Update(c, data.data(), data.size());
+        auto* h = static_cast<Sha256Holder*>(ctx_);
+        mbedtls_sha256_update(&h->ctx, data.data(), data.size());
     } else {
-        auto *c = static_cast<SHA_CTX *>(ctx_);
-        SHA1_Update(c, data.data(), data.size());
+        auto* h = static_cast<Sha1Holder*>(ctx_);
+        mbedtls_sha1_update(&h->ctx, data.data(), data.size());
     }
 #else
     (void)data;
@@ -55,24 +74,26 @@ void SHA::update(byte_view data) {
 }
 
 void SHA::finalize_into(byte_data out) {
-#ifdef USE_OPENSSL_SHA
+#ifdef USE_MBEDTLS
     if (!ctx_) return;
     if (alg_ == Algorithm::SHA256) {
-        if (out.size() < SHA256_DIGEST_LENGTH) {
+        if (out.size() < SHA256_DIGEST_LEN) {
             LOGE("SHA256 output buffer too small\n");
             std::abort();
         }
-        auto *c = static_cast<SHA256_CTX *>(ctx_);
-        SHA256_Final(out.data(), c);
-        delete c;
+        auto* h = static_cast<Sha256Holder*>(ctx_);
+        mbedtls_sha256_finish(&h->ctx, out.data());
+        mbedtls_sha256_free(&h->ctx);
+        delete h;
     } else {
-        if (out.size() < SHA_DIGEST_LENGTH) {
+        if (out.size() < SHA1_DIGEST_LEN) {
             LOGE("SHA1 output buffer too small\n");
             std::abort();
         }
-        auto *c = static_cast<SHA_CTX *>(ctx_);
-        SHA1_Final(out.data(), c);
-        delete c;
+        auto* h = static_cast<Sha1Holder*>(ctx_);
+        mbedtls_sha1_finish(&h->ctx, out.data());
+        mbedtls_sha1_free(&h->ctx);
+        delete h;
     }
     ctx_ = nullptr;
 #else
@@ -81,9 +102,8 @@ void SHA::finalize_into(byte_data out) {
 }
 
 std::size_t SHA::output_size() const {
-#ifdef USE_OPENSSL_SHA
-    return alg_ == Algorithm::SHA256 ? static_cast<std::size_t>(SHA256_DIGEST_LENGTH)
-                                     : static_cast<std::size_t>(SHA_DIGEST_LENGTH);
+#ifdef USE_MBEDTLS
+    return alg_ == Algorithm::SHA256 ? SHA256_DIGEST_LEN : SHA1_DIGEST_LEN;
 #else
     return 0;
 #endif
@@ -457,8 +477,267 @@ bool fmt_compressed_any(FileFormat fmt) {
     return fmt_compressed(fmt);
 }
 
-std::vector<std::uint8_t> sign_payload(byte_view /*payload*/) {
-    // Standalone version does not implement AVB1 signing.
+// ===========================
+// AVB1 BootSignature (DER) verify / sign
+// ===========================
+
+#ifdef USE_MBEDTLS
+namespace {
+
+constexpr unsigned char AVB0_MAGIC[] = {'A', 'V', 'B', '0'};
+
+bool der_read_tlv(const std::uint8_t **p, const std::uint8_t *end,
+                  std::uint8_t *tag, const std::uint8_t **content, std::size_t *content_len) {
+    if (*p >= end) return false;
+    *tag = *(*p)++;
+    if (*p >= end) return false;
+    std::size_t len = *(*p)++;
+    if (len & 0x80) {
+        int n = len & 0x7f;
+        if (n > 4 || *p + n > end) return false;
+        len = 0;
+        for (int i = 0; i < n; i++) len = (len << 8) | (*p)[i];
+        *p += n;
+    }
+    if (*p + len > end) return false;
+    *content = *p;
+    *content_len = len;
+    *p += len;
+    return true;
+}
+
+bool der_outer_sequence(byte_view tail, const std::uint8_t **seq_content,
+                        std::size_t *seq_len) {
+    const std::uint8_t *p = tail.data();
+    const std::uint8_t *end = tail.data() + tail.size();
+    while (p < end && *p == 0) p++;
+    if (p >= end) return false;
+    std::uint8_t tag;
+    if (!der_read_tlv(&p, end, &tag, seq_content, seq_len)) return false;
+    return tag == 0x30;
+}
+
+bool der_sequence_element(const std::uint8_t *seq, std::size_t seq_len, int index,
+                          const std::uint8_t **elem_content, std::size_t *elem_len) {
+    const std::uint8_t *p = seq;
+    const std::uint8_t *end = seq + seq_len;
+    std::uint8_t tag;
+    for (int i = 0; i <= index; i++) {
+        if (p >= end) return false;
+        if (!der_read_tlv(&p, end, &tag, elem_content, elem_len)) return false;
+        if (i < index) p = *elem_content + *elem_len;
+    }
+    return true;
+}
+
+bool der_attr_length(const std::uint8_t *attr, std::size_t attr_len, std::uint64_t *out_len) {
+    const std::uint8_t *p = attr;
+    const std::uint8_t *end = attr + attr_len;
+    std::uint8_t tag;
+    const std::uint8_t *c;
+    std::size_t cl;
+    if (!der_read_tlv(&p, end, &tag, &c, &cl)) return false;
+    if (p >= end) return false;
+    if (!der_read_tlv(&p, end, &tag, &c, &cl)) return false;
+    if (tag != 0x02 || cl > 8) return false;
+    *out_len = 0;
+    for (std::size_t i = 0; i < cl; i++) *out_len = (*out_len << 8) | c[i];
+    return true;
+}
+
+}  // namespace
+#endif
+
+bool avb_verify_boot_signature(byte_view tail, byte_view payload,
+                               const char *cert_pem_path) {
+#ifdef USE_MBEDTLS
+    if (tail.size() < 4) return false;
+    if (std::memcmp(tail.data(), AVB0_MAGIC, 4) == 0) return false;
+
+    const std::uint8_t *seq_content = nullptr;
+    std::size_t seq_len = 0;
+    if (!der_outer_sequence(tail, &seq_content, &seq_len)) return false;
+
+    const std::uint8_t *cert_content = nullptr;
+    std::size_t cert_len = 0;
+    if (!der_sequence_element(seq_content, seq_len, 1, &cert_content, &cert_len))
+        return false;
+    const std::uint8_t *attr_content = nullptr;
+    std::size_t attr_len = 0;
+    if (!der_sequence_element(seq_content, seq_len, 3, &attr_content, &attr_len))
+        return false;
+    const std::uint8_t *sig_content = nullptr;
+    std::size_t sig_len = 0;
+    if (!der_sequence_element(seq_content, seq_len, 4, &sig_content, &sig_len))
+        return false;
+
+    std::uint64_t attr_payload_len = 0;
+    if (!der_attr_length(attr_content, attr_len, &attr_payload_len)) return false;
+    if (payload.size() != attr_payload_len) return false;
+
+    mbedtls_x509_crt crt;
+    mbedtls_x509_crt_init(&crt);
+    int ret = mbedtls_x509_crt_parse(&crt, cert_content, cert_len);
+    if (ret != 0) {
+        mbedtls_x509_crt_free(&crt);
+        return false;
+    }
+    if (cert_pem_path) {
+        mbedtls_x509_crt_free(&crt);
+        mbedtls_x509_crt_init(&crt);
+        if (mbedtls_x509_crt_parse_file(&crt, cert_pem_path) != 0) {
+            mbedtls_x509_crt_free(&crt);
+            return false;
+        }
+    }
+
+    unsigned char digest[32];
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts(&sha, 0);
+    mbedtls_sha256_update(&sha, payload.data(), payload.size());
+    mbedtls_sha256_update(&sha, attr_content, attr_len);
+    mbedtls_sha256_finish(&sha, digest);
+    mbedtls_sha256_free(&sha);
+
+    ret = mbedtls_pk_verify(&crt.pk, MBEDTLS_MD_SHA256, digest, sizeof(digest),
+                            sig_content, sig_len);
+    mbedtls_x509_crt_free(&crt);
+    return ret == 0;
+#else
+    (void)tail;
+    (void)payload;
+    (void)cert_pem_path;
+    return false;
+#endif
+}
+
+std::vector<std::uint8_t> avb_sign_boot_image(byte_view payload, const char *name,
+                                               const char *cert_pem_path,
+                                               const char *key_pem_path) {
+#ifdef USE_MBEDTLS
+    if (!cert_pem_path || !key_pem_path) return {};
+
+    mbedtls_x509_crt crt;
+    mbedtls_pk_context pkey;
+    mbedtls_x509_crt_init(&crt);
+    mbedtls_pk_init(&pkey);
+
+    static mbedtls_entropy_context entropy;
+    static mbedtls_ctr_drbg_context ctr_drbg;
+    static int rng_seeded = 0;
+    if (rng_seeded == 0) {
+        mbedtls_entropy_init(&entropy);
+        mbedtls_ctr_drbg_init(&ctr_drbg);
+        if (mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, nullptr, 0) != 0) {
+            mbedtls_x509_crt_free(&crt);
+            mbedtls_pk_free(&pkey);
+            return {};
+        }
+        rng_seeded = 1;
+    }
+    if (mbedtls_x509_crt_parse_file(&crt, cert_pem_path) != 0 ||
+        mbedtls_pk_parse_keyfile(&pkey, key_pem_path, nullptr,
+                                 mbedtls_ctr_drbg_random, &ctr_drbg) != 0) {
+        mbedtls_x509_crt_free(&crt);
+        mbedtls_pk_free(&pkey);
+        return {};
+    }
+    if (mbedtls_pk_can_do(&pkey, MBEDTLS_PK_RSA) == 0) {
+        mbedtls_x509_crt_free(&crt);
+        mbedtls_pk_free(&pkey);
+        return {};
+    }
+
+    const char *name_str = name && name[0] ? name : "/boot";
+    std::uint64_t payload_len = payload.size();
+    std::size_t name_len = std::strlen(name_str);
+    std::vector<std::uint8_t> attr_der;
+    attr_der.push_back(0x30);
+    std::size_t attr_inner = 1 + (name_len >= 128 ? 2 : 1) + name_len + 1 + 1 + 1 + 8;
+    if (name_len < 128) {
+        attr_der.push_back(static_cast<std::uint8_t>(attr_inner));
+    } else {
+        attr_der.push_back(0x82);
+        attr_der.push_back(static_cast<std::uint8_t>(attr_inner >> 8));
+        attr_der.push_back(static_cast<std::uint8_t>(attr_inner));
+    }
+    attr_der.push_back(0x13);
+    attr_der.push_back(static_cast<std::uint8_t>(name_len));
+    attr_der.insert(attr_der.end(), name_str, name_str + name_len);
+    attr_der.push_back(0x02);
+    attr_der.push_back(8);
+    for (int i = 7; i >= 0; i--)
+        attr_der.push_back(static_cast<std::uint8_t>(payload_len >> (i * 8)));
+
+    unsigned char digest[32];
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts(&sha, 0);
+    mbedtls_sha256_update(&sha, payload.data(), payload.size());
+    mbedtls_sha256_update(&sha, attr_der.data(), attr_der.size());
+    mbedtls_sha256_finish(&sha, digest);
+    mbedtls_sha256_free(&sha);
+
+    std::size_t sig_size = mbedtls_pk_get_len(&pkey);
+    std::vector<std::uint8_t> sig(sig_size);
+    std::size_t sig_len = 0;
+    if (mbedtls_pk_sign(&pkey, MBEDTLS_MD_SHA256, digest, sizeof(digest),
+                        sig.data(), sig_size, &sig_len,
+                        mbedtls_ctr_drbg_random, &ctr_drbg) != 0) {
+        mbedtls_x509_crt_free(&crt);
+        mbedtls_pk_free(&pkey);
+        return {};
+    }
+    sig.resize(sig_len);
+
+    const unsigned char *cert_der = crt.raw.p;
+    std::size_t cert_der_len = crt.raw.len;
+    const unsigned char alg_der[] = {
+        0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b, 0x05, 0x00
+    };
+    std::vector<std::uint8_t> out;
+    out.push_back(0x30);
+    std::size_t total = 3 + cert_der_len + sizeof(alg_der) + attr_der.size() +
+                        (sig_len >= 128 ? 3u : 2u) + sig_len;
+    if (total < 128) {
+        out.push_back(static_cast<std::uint8_t>(total));
+    } else {
+        out.push_back(0x82);
+        out.push_back(static_cast<std::uint8_t>(total >> 8));
+        out.push_back(static_cast<std::uint8_t>(total));
+    }
+    out.push_back(0x02);
+    out.push_back(0x01);
+    out.push_back(0x01);
+    out.insert(out.end(), cert_der, cert_der + cert_der_len);
+    out.insert(out.end(), alg_der, alg_der + sizeof(alg_der));
+    out.insert(out.end(), attr_der.begin(), attr_der.end());
+    out.push_back(0x04);
+    if (sig_len < 128) {
+        out.push_back(static_cast<std::uint8_t>(sig_len));
+    } else {
+        out.push_back(0x82);
+        out.push_back(static_cast<std::uint8_t>(sig_len >> 8));
+        out.push_back(static_cast<std::uint8_t>(sig_len));
+    }
+    out.insert(out.end(), sig.begin(), sig.end());
+    mbedtls_x509_crt_free(&crt);
+    mbedtls_pk_free(&pkey);
+    return out;
+#else
+    (void)payload;
+    (void)name;
+    (void)cert_pem_path;
+    (void)key_pem_path;
+    return {};
+#endif
+}
+
+std::vector<std::uint8_t> sign_payload(byte_view payload) {
+#ifdef USE_MBEDTLS
+    (void)payload;
+#endif
     return {};
 }
 

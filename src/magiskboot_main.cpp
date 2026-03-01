@@ -7,19 +7,28 @@
 
 // Entry point when linked into ksud (multi-call binary). Standalone build defines main() below.
 int magiskboot_main(int argc, char **argv) {
-    if (argc < 3) {
+    if (argc < 2) {
         std::fprintf(stderr,
                      "Usage:\n"
                      "  magiskboot unpack <boot.img> [--skip-decomp] [--hdr]\n"
                      "  magiskboot repack <in-boot.img> <out-boot.img> [--skip-comp]\n"
                      "  magiskboot split-dtb <kernel-or-boot.img> [--skip-decomp]\n"
-                     "  magiskboot cpio <ramdisk.cpio> <command> [command...]\n");
+                     "  magiskboot cpio <ramdisk.cpio> <command> [command...]\n"
+                     "  magiskboot verify <boot.img> [x509.pem]\n"
+                     "  magiskboot sign <boot.img> [name] [x509.pem pk8]\n"
+                     "  magiskboot cleanup\n");
         return 1;
     }
 
     std::string cmd = argv[1];
+    if (cmd.size() >= 2 && cmd[0] == '-' && cmd[1] == '-') {
+        cmd = cmd.substr(2);
+    }
     try {
-        if (cmd == "unpack") {
+        if (cmd == "cleanup") {
+            cleanup();
+            return 0;
+        } else if (cmd == "unpack") {
             const char *img = argv[2];
             bool skip_decomp = false;
             bool hdr = false;
@@ -58,6 +67,34 @@ int magiskboot_main(int argc, char **argv) {
                 commands.emplace_back(argv[i]);
             }
             return cpio_commands(argv[2], commands);
+        } else if (cmd == "verify") {
+            if (argc < 3) {
+                std::fprintf(stderr, "verify needs <boot.img> [x509.pem]\n");
+                return 1;
+            }
+            const char *img = argv[2];
+            const char *cert = (argc >= 4) ? argv[3] : nullptr;
+            return verify_boot_image(img, cert);
+        } else if (cmd == "sign") {
+            if (argc < 3) {
+                std::fprintf(stderr, "sign needs <boot.img> [name] [x509.pem pk8]\n");
+                return 1;
+            }
+            const char *img = argv[2];
+            const char *name = nullptr;
+            const char *cert = nullptr;
+            const char *key = nullptr;
+            if (argc == 5) {
+                cert = argv[3];
+                key = argv[4];
+            } else if (argc == 6) {
+                name = argv[3];
+                cert = argv[4];
+                key = argv[5];
+            } else if (argc == 4) {
+                name = argv[3];
+            }
+            return sign_boot_image_cmd(img, name, cert, key);
         } else {
             std::fprintf(stderr, "Unknown command: %s\n", cmd.c_str());
             return 1;

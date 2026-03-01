@@ -17,6 +17,11 @@ int split_image_dtb(Utf8CStr filename, bool skip_decomp = false);
 void cleanup();
 FileFormat check_fmt(const void *buf, size_t len);
 
+// AVB1 verify/sign CLI: 0 = success, 1 = failure
+int verify_boot_image(const char *img_path, const char *cert_pem_path);
+int sign_boot_image_cmd(const char *img_path, const char *name,
+                        const char *cert_pem_path, const char *key_pem_path);
+
 // Public APIs (wrappers in bootimg.cpp)
 inline int unpack(const char *image, bool skip_decomp = false, bool hdr = false) {
     return unpack(Utf8CStr(image), skip_decomp, hdr);
