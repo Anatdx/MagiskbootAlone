@@ -7,6 +7,9 @@
 #include <zlib.h>
 #include <lz4.h>
 #include <lz4frame.h>
+#ifdef USE_LIBLZMA
+#include <lzma.h>
+#endif
 #ifdef USE_OPENSSL_SHA
 #include <openssl/sha.h>
 #endif
@@ -290,6 +293,70 @@ void zlib_inflate_gzip(byte_view in, int out_fd) {
     inflateEnd(&strm);
 }
 
+#ifdef USE_LIBLZMA
+void xz_compress(byte_view in, int out_fd) {
+    lzma_stream stream = LZMA_STREAM_INIT;
+    lzma_ret ret = lzma_easy_encoder(&stream, LZMA_PRESET_DEFAULT, LZMA_CHECK_CRC64);
+    if (ret != LZMA_OK) {
+        throw std::runtime_error("lzma_easy_encoder failed");
+    }
+    std::array<std::uint8_t, 64 * 1024> out_buf{};
+    stream.next_in = in.data();
+    stream.avail_in = in.size();
+    lzma_action action = LZMA_RUN;
+    while (true) {
+        stream.next_out = out_buf.data();
+        stream.avail_out = out_buf.size();
+        if (stream.avail_in == 0) {
+            action = LZMA_FINISH;
+        }
+        ret = lzma_code(&stream, action);
+        if (ret != LZMA_OK && ret != LZMA_STREAM_END) {
+            lzma_end(&stream);
+            throw std::runtime_error("xz compress failed");
+        }
+        const std::size_t produced = out_buf.size() - stream.avail_out;
+        if (produced > 0 && xwrite(out_fd, out_buf.data(), produced) < 0) {
+            lzma_end(&stream);
+            throw std::runtime_error("write failed");
+        }
+        if (ret == LZMA_STREAM_END) {
+            break;
+        }
+    }
+    lzma_end(&stream);
+}
+
+void xz_decompress(byte_view in, int out_fd) {
+    lzma_stream stream = LZMA_STREAM_INIT;
+    lzma_ret ret = lzma_stream_decoder(&stream, UINT64_MAX, 0);
+    if (ret != LZMA_OK) {
+        throw std::runtime_error("lzma_stream_decoder failed");
+    }
+    std::array<std::uint8_t, 64 * 1024> out_buf{};
+    stream.next_in = in.data();
+    stream.avail_in = in.size();
+    while (true) {
+        stream.next_out = out_buf.data();
+        stream.avail_out = out_buf.size();
+        ret = lzma_code(&stream, LZMA_RUN);
+        if (ret != LZMA_OK && ret != LZMA_STREAM_END) {
+            lzma_end(&stream);
+            throw std::runtime_error("xz decompress failed");
+        }
+        const std::size_t produced = out_buf.size() - stream.avail_out;
+        if (produced > 0 && xwrite(out_fd, out_buf.data(), produced) < 0) {
+            lzma_end(&stream);
+            throw std::runtime_error("write failed");
+        }
+        if (ret == LZMA_STREAM_END) {
+            break;
+        }
+    }
+    lzma_end(&stream);
+}
+#endif
+
 } // namespace
 
 void compress_bytes(FileFormat format, byte_view in_bytes, int out_fd) {
@@ -307,6 +374,13 @@ void compress_bytes(FileFormat format, byte_view in_bytes, int out_fd) {
         case FileFormat::LZ4_LG:
             lz4_legacy_compress(in_bytes, out_fd);
             break;
+        case FileFormat::XZ:
+#ifdef USE_LIBLZMA
+            xz_compress(in_bytes, out_fd);
+            break;
+#else
+            unsupported_format("compress", format);
+#endif
         default:
             unsupported_format("compress", format);
     }
@@ -325,6 +399,13 @@ void decompress_bytes(FileFormat format, byte_view in_bytes, int out_fd) {
         case FileFormat::LZ4_LG:
             lz4_legacy_decompress(in_bytes, out_fd);
             break;
+        case FileFormat::XZ:
+#ifdef USE_LIBLZMA
+            xz_decompress(in_bytes, out_fd);
+            break;
+#else
+            unsupported_format("decompress", format);
+#endif
         default:
             unsupported_format("decompress", format);
     }

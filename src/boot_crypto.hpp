@@ -53,7 +53,7 @@ private:
 std::unique_ptr<SHA> get_sha(bool use_sha1);
 void sha256_hash(byte_view data, byte_data out);
 
-// Compression helpers (gzip only in this standalone version).
+// Compression helpers (gzip/lz4, and optional xz when built with liblzma).
 void compress_bytes(FileFormat format, byte_view in_bytes, int out_fd);
 void decompress_bytes(FileFormat format, byte_view in_bytes, int out_fd);
 

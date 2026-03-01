@@ -45,8 +45,50 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Android")
   # NDK provides zlib in the sysroot (libz)
   set(ZLIB_FOUND 1)
+  find_library(LZMA_LIB lzma)
 else()
   find_package(ZLIB REQUIRED)
+  find_library(LZMA_LIB lzma)
+endif()
+include(CheckIncludeFile)
+check_include_file("lzma.h" HAVE_LZMA_H)
+
+set(MAGISKBOOT_USE_FETCHED_LZMA OFF)
+if(NOT (LZMA_LIB AND HAVE_LZMA_H))
+  include(FetchContent)
+  # Build only liblzma from upstream xz, disable all command-line tools and NLS.
+  set(XZ_TOOL_XZ OFF CACHE BOOL "" FORCE)
+  set(XZ_TOOL_XZDEC OFF CACHE BOOL "" FORCE)
+  set(XZ_TOOL_LZMADEC OFF CACHE BOOL "" FORCE)
+  set(XZ_TOOL_LZMAINFO OFF CACHE BOOL "" FORCE)
+  set(XZ_NLS OFF CACHE BOOL "" FORCE)
+  set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+  set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(
+    magisk_xz
+    GIT_REPOSITORY https://github.com/tukaani-project/xz.git
+    GIT_TAG v5.6.4
+    GIT_SHALLOW TRUE
+  )
+  FetchContent_GetProperties(magisk_xz)
+  if(NOT magisk_xz_POPULATED)
+    if(POLICY CMP0169)
+      cmake_policy(PUSH)
+      cmake_policy(SET CMP0169 OLD)
+    endif()
+    FetchContent_Populate(magisk_xz)
+    if(POLICY CMP0169)
+      cmake_policy(POP)
+    endif()
+  endif()
+  add_subdirectory(
+    ${magisk_xz_SOURCE_DIR}
+    ${magisk_xz_BINARY_DIR}
+    EXCLUDE_FROM_ALL
+  )
+  if(TARGET liblzma)
+    set(MAGISKBOOT_USE_FETCHED_LZMA ON)
+  endif()
 endif()
 
 if(MAGISKBOOT_USE_OPENSSL)
@@ -76,6 +118,19 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android")
   # LZ4: no override — match Magisk (use lz4.c defaults: method 1 on GCC/Clang)
 else()
   target_link_libraries(magiskboot PRIVATE ZLIB::ZLIB)
+endif()
+
+if(LZMA_LIB AND HAVE_LZMA_H)
+  target_link_libraries(magiskboot PRIVATE ${LZMA_LIB})
+  target_compile_definitions(magiskboot PRIVATE USE_LIBLZMA=1)
+  message(STATUS "magiskboot: XZ support enabled via system liblzma")
+elseif(MAGISKBOOT_USE_FETCHED_LZMA)
+  target_link_libraries(magiskboot PRIVATE liblzma)
+  target_include_directories(magiskboot PRIVATE "${magisk_xz_SOURCE_DIR}/src/liblzma/api")
+  target_compile_definitions(magiskboot PRIVATE USE_LIBLZMA=1)
+  message(STATUS "magiskboot: XZ support enabled via vendored xz/liblzma")
+else()
+  message(WARNING "magiskboot: liblzma not found; XZ support disabled")
 endif()
 
 if(MAGISKBOOT_USE_OPENSSL)

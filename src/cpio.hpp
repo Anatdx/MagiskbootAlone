@@ -25,10 +25,18 @@ public:
 
     bool add(std::uint32_t mode, std::string_view cpio_path, const std::string& src_file);
     bool mkdir(std::uint32_t mode, const std::string& path);
-    bool rm(const std::string& path);
+    bool rm(const std::string& path, bool recursive = false);
     bool mv(const std::string& from, const std::string& to);
+    bool ln(const std::string& src, const std::string& dst);
+    void ls(const std::string& path, bool recursive) const;
+    bool extract(const std::string& path, const std::string& out) const;
+    bool extract_all() const;
+    bool patch(bool keep_verity, bool keep_force_encrypt);
+    bool backup(const std::string& origin, bool skip_compress);
+    bool restore();
 
 private:
+    bool extract_entry(const std::string& normalized_path, const std::string& out) const;
     static std::string normalize_path(const std::string& path);
     std::map<std::string, CpioEntry> entries_;
 };
