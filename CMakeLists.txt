@@ -95,6 +95,10 @@ include(FetchContent)
 set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
 set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
 set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
+# This project consumes mbedcrypto and mbedx509 as a third-party dependency.
+# New host compilers must not turn warnings in unused Mbed TLS targets into
+# fatal errors for MagiskbootAlone.
+set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
   mbedtls
   GIT_REPOSITORY https://github.com/Mbed-TLS/mbedtls.git
@@ -160,4 +164,3 @@ if(MAGISKBOOT_BUILD_TESTS)
   target_link_libraries(cpio_document_test PRIVATE magiskboot_core)
   add_test(NAME cpio_document_test COMMAND cpio_document_test)
 endif()
-
