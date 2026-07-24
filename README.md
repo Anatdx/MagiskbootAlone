@@ -11,6 +11,34 @@ Boot image unpack/repack/split-dtb logic is derived from [Magisk](https://github
 - **Split DTB** from kernel images that embed device tree
 - **Compression**: GZIP/ZOPFLI (via zlib); optional LZ4/XZ when enabled
 - **Hashing & AVB**: SHA-1 / SHA-256 and AVB verify/sign via **mbedTLS** (no OpenSSL, no picosha2)
+- **CPIO document API**: stable node IDs, complete newc metadata, streamed content,
+  recursive moves, Unix metadata editing, symbolic links, and hard links
+
+## Embedded CPIO document API
+
+`src/cpio.hpp` exposes a C++17 API for hosts that need to edit a ramdisk
+without extracting every entry into a real directory:
+
+```cpp
+CpioDocument document;
+document.load(ramdisk_bytes, ramdisk_size);
+
+auto init = document.find("init");
+document.read_content(*init, [](const std::uint8_t* data, std::size_t size) {
+    return consume(data, size);
+});
+
+document.replace_content(*init, [](std::uint8_t* output, std::size_t capacity) {
+    return produce(output, capacity);  // 0 = EOF, negative = failure
+});
+
+document.dump_fd(output_fd);
+```
+
+The document keeps node IDs stable across rename and move operations. It also
+preserves inode/link information, timestamps, device metadata, and archive
+order during a load/edit/dump cycle. Path-based CLI commands remain available
+for compatibility, but new embedders should use the node API.
 
 ## Requirements
 

@@ -2,14 +2,17 @@ cmake_minimum_required(VERSION 3.20)
 
 project(magiskboot_alone LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Crypto: mbedTLS only (SHA1/SHA256 + AVB verify/sign). No OpenSSL, no picosha2.
-# LZ4: Android uses Magisk's LZ4 (git clone in CMake) for identical ABI/behavior as Magisk magiskboot.
-# Host can use vendored external/lz4 or upstream lz4.
+# LZ4: prefer the vendored Magisk-compatible source on every platform so
+# standalone and embedded builds use the same implementation.
 set(LZ4_VENDORED "${CMAKE_CURRENT_SOURCE_DIR}/external/lz4")
-if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+if(EXISTS "${LZ4_VENDORED}/lz4.c")
+  set(LZ4_LIB_DIR "${LZ4_VENDORED}")
+  message(STATUS "magiskboot: using vendored LZ4 (external/lz4)")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Android")
   include(FetchContent)
   FetchContent_Declare(
     magisk_lz4
@@ -23,9 +26,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android")
   endif()
   set(LZ4_LIB_DIR "${magisk_lz4_SOURCE_DIR}/native/src/external/lz4/lib")
   message(STATUS "magiskboot: using LZ4 from Magisk (git clone)")
-elseif(EXISTS "${LZ4_VENDORED}/lz4.c")
-  set(LZ4_LIB_DIR "${LZ4_VENDORED}")
-  message(STATUS "magiskboot: using vendored LZ4 (external/lz4)")
 else()
   include(FetchContent)
   FetchContent_Declare(
@@ -105,45 +105,58 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(mbedtls)
 message(STATUS "magiskboot: using mbedTLS for SHA and AVB")
 
-add_executable(magiskboot
+set(MAGISKBOOT_CORE_SOURCES
   src/base_host.cpp
   src/bootimg.cpp
   src/boot_crypto.cpp
   src/cpio.cpp
-  src/magiskboot_main.cpp
   ${LZ4_LIB_DIR}/lz4.c
   ${LZ4_LIB_DIR}/lz4frame.c
   ${LZ4_LIB_DIR}/lz4hc.c
   ${LZ4_LIB_DIR}/xxhash.c
 )
 
-target_compile_definitions(magiskboot PRIVATE MAGISKBOOT_STANDALONE=1)
-target_include_directories(magiskboot PRIVATE
+add_library(magiskboot_core STATIC ${MAGISKBOOT_CORE_SOURCES})
+target_include_directories(magiskboot_core PUBLIC
   src
+)
+target_include_directories(magiskboot_core PRIVATE
   ${LZ4_LIB_DIR}
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Android")
-  target_link_libraries(magiskboot PRIVATE z)
+  target_link_libraries(magiskboot_core PUBLIC z)
   # LZ4: no override — match Magisk (use lz4.c defaults: method 1 on GCC/Clang)
 else()
-  target_link_libraries(magiskboot PRIVATE ZLIB::ZLIB)
+  target_link_libraries(magiskboot_core PUBLIC ZLIB::ZLIB)
 endif()
 
 if(LZMA_LIB AND HAVE_LZMA_H)
-  target_link_libraries(magiskboot PRIVATE ${LZMA_LIB})
-  target_compile_definitions(magiskboot PRIVATE USE_LIBLZMA=1)
+  target_link_libraries(magiskboot_core PUBLIC ${LZMA_LIB})
+  target_compile_definitions(magiskboot_core PRIVATE USE_LIBLZMA=1)
   message(STATUS "magiskboot: XZ support enabled via system liblzma")
 elseif(MAGISKBOOT_USE_FETCHED_LZMA)
-  target_link_libraries(magiskboot PRIVATE liblzma)
-  target_include_directories(magiskboot PRIVATE "${magisk_xz_SOURCE_DIR}/src/liblzma/api")
-  target_compile_definitions(magiskboot PRIVATE USE_LIBLZMA=1)
+  target_link_libraries(magiskboot_core PUBLIC liblzma)
+  target_include_directories(magiskboot_core PRIVATE "${magisk_xz_SOURCE_DIR}/src/liblzma/api")
+  target_compile_definitions(magiskboot_core PRIVATE USE_LIBLZMA=1)
   message(STATUS "magiskboot: XZ support enabled via vendored xz/liblzma")
 else()
   message(WARNING "magiskboot: liblzma not found; XZ support disabled")
 endif()
 
-target_link_libraries(magiskboot PRIVATE mbedx509 mbedcrypto)
-target_compile_definitions(magiskboot PRIVATE USE_MBEDTLS=1)
-target_include_directories(magiskboot PRIVATE ${mbedtls_SOURCE_DIR}/include)
+target_link_libraries(magiskboot_core PUBLIC mbedx509 mbedcrypto)
+target_compile_definitions(magiskboot_core PRIVATE USE_MBEDTLS=1)
+target_include_directories(magiskboot_core PRIVATE ${mbedtls_SOURCE_DIR}/include)
+
+add_executable(magiskboot src/magiskboot_main.cpp)
+target_compile_definitions(magiskboot PRIVATE MAGISKBOOT_STANDALONE=1)
+target_link_libraries(magiskboot PRIVATE magiskboot_core)
+
+option(MAGISKBOOT_BUILD_TESTS "Build MagiskbootAlone unit tests" ON)
+if(MAGISKBOOT_BUILD_TESTS)
+  enable_testing()
+  add_executable(cpio_document_test tests/cpio_document_test.cpp)
+  target_link_libraries(cpio_document_test PRIVATE magiskboot_core)
+  add_test(NAME cpio_document_test COMMAND cpio_document_test)
+endif()
 

@@ -1,16 +1,22 @@
 #include "cpio.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <map>
 #include <fstream>
 #include <functional>
+#include <limits>
+#include <map>
+#include <set>
 #include <sstream>
+#include <string>
 #include <string_view>
 #include <sys/stat.h>
+#include <tuple>
+#include <utility>
 #if defined(__linux__) || defined(__ANDROID__)
 #include <sys/sysmacros.h>  /* makedev */
 #endif
@@ -78,22 +84,29 @@ void format_hex8(char* out, std::uint32_t v) {
     }
 }
 
-bool write_entry(int fd, std::string_view entry_name, std::uint32_t ino, const CpioEntry& entry) {
+bool write_entry(int fd, std::string_view entry_name, const CpioEntry& entry) {
+    if (entry_name.size() >= std::numeric_limits<std::uint32_t>::max() ||
+        entry.data.size() > std::numeric_limits<std::uint32_t>::max()) {
+        LOGE("cpio entry is too large to encode: %.*s\n",
+             static_cast<int>(entry_name.size()), entry_name.data());
+        return false;
+    }
+
     NewcHeader h{};
     std::memcpy(h.magic.data(), "070701", 6);
-    format_hex8(h.ino.data(), ino);
+    format_hex8(h.ino.data(), entry.ino);
     format_hex8(h.mode.data(), entry.mode);
     format_hex8(h.uid.data(), entry.uid);
     format_hex8(h.gid.data(), entry.gid);
-    format_hex8(h.nlink.data(), (entry.mode & S_IFMT) == S_IFDIR ? 2U : 1U);
-    format_hex8(h.mtime.data(), 0);
+    format_hex8(h.nlink.data(), entry.nlink);
+    format_hex8(h.mtime.data(), entry.mtime);
     format_hex8(h.filesize.data(), static_cast<std::uint32_t>(entry.data.size()));
-    format_hex8(h.devmajor.data(), 0);
-    format_hex8(h.devminor.data(), 0);
+    format_hex8(h.devmajor.data(), entry.dev_major);
+    format_hex8(h.devminor.data(), entry.dev_minor);
     format_hex8(h.rdevmajor.data(), entry.rdev_major);
     format_hex8(h.rdevminor.data(), entry.rdev_minor);
     format_hex8(h.namesize.data(), static_cast<std::uint32_t>(entry_name.size() + 1));
-    format_hex8(h.check.data(), 0);
+    format_hex8(h.check.data(), entry.check);
 
     if (!write_all(fd, &h, sizeof(h))) {
         return false;
@@ -260,13 +273,69 @@ bool transcode_xz(const std::vector<std::uint8_t>& input, std::vector<std::uint8
 #endif
 }
 
+bool read_source(
+    const CpioDataSource& source,
+    std::size_t max_bytes,
+    std::vector<std::uint8_t>& output) {
+    if (!source) {
+        return false;
+    }
+    std::vector<std::uint8_t> result;
+    std::array<std::uint8_t, 64U * 1024U> buffer{};
+    while (true) {
+        const ssize_t count = source(buffer.data(), buffer.size());
+        if (count < 0 || static_cast<std::size_t>(count) > buffer.size()) {
+            return false;
+        }
+        if (count == 0) {
+            break;
+        }
+        const auto chunk_size = static_cast<std::size_t>(count);
+        if (result.size() > max_bytes || chunk_size > max_bytes - result.size()) {
+            return false;
+        }
+        result.insert(result.end(), buffer.begin(), buffer.begin() + count);
+    }
+    output = std::move(result);
+    return true;
+}
+
+bool is_valid_child_name(std::string_view name) {
+    return !name.empty() && name != "." && name != ".." &&
+           name.find('/') == std::string_view::npos &&
+           name.find('\0') == std::string_view::npos;
+}
+
+bool has_unsafe_path_segment(std::string_view path) {
+    std::size_t start = 0;
+    while (start <= path.size()) {
+        const std::size_t separator = path.find('/', start);
+        const std::size_t end =
+            separator == std::string_view::npos ? path.size() : separator;
+        if (path.substr(start, end - start) == "..") {
+            return true;
+        }
+        if (separator == std::string_view::npos) {
+            break;
+        }
+        start = separator + 1;
+    }
+    return path.find('\0') != std::string_view::npos;
+}
+
 }  // namespace
 
 std::string CpioArchive::normalize_path(const std::string& path) {
     std::vector<std::string> segs;
     std::string current;
     for (char c : path) {
+        if (c == '\0') {
+            return {};
+        }
         if (c == '/') {
+            if (current == "..") {
+                return {};
+            }
             if (!current.empty() && current != ".") {
                 segs.push_back(current);
             }
@@ -274,6 +343,9 @@ std::string CpioArchive::normalize_path(const std::string& path) {
             continue;
         }
         current.push_back(c);
+    }
+    if (current == "..") {
+        return {};
     }
     if (!current.empty() && current != ".") {
         segs.push_back(current);
@@ -289,17 +361,16 @@ std::string CpioArchive::normalize_path(const std::string& path) {
 }
 
 bool CpioArchive::load(const std::string& path) {
-    entries_.clear();
     struct stat st {};
     if (::stat(path.c_str(), &st) != 0) {
         if (errno == ENOENT) {
-            return true;
+            return load(nullptr, 0);
         }
         PLOGE("stat %s", path.c_str());
         return false;
     }
     if (st.st_size == 0) {
-        return true;
+        return load(nullptr, 0);
     }
 
     mmap_data data(path.c_str(), false);
@@ -307,10 +378,68 @@ bool CpioArchive::load(const std::string& path) {
         PLOGE("mmap %s", path.c_str());
         return false;
     }
+    return load(data.data(), data.size());
+}
 
-    const auto* p = data.data();
+bool CpioArchive::load(const std::uint8_t* data, std::size_t size) {
+    CpioArchive replacement;
+    if (!replacement.parse(data, size)) {
+        return false;
+    }
+    *this = std::move(replacement);
+    return true;
+}
+
+bool CpioArchive::load_fd(int fd, std::size_t max_bytes) {
+    if (fd < 0) {
+        errno = EBADF;
+        return false;
+    }
+
+    std::vector<std::uint8_t> bytes;
+    std::array<std::uint8_t, 64U * 1024U> buffer{};
+    while (true) {
+        const ssize_t count = ::read(fd, buffer.data(), buffer.size());
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            PLOGE("read cpio stream");
+            return false;
+        }
+        if (count == 0) {
+            break;
+        }
+        const auto chunk_size = static_cast<std::size_t>(count);
+        if (bytes.size() > max_bytes || chunk_size > max_bytes - bytes.size()) {
+            LOGE("cpio stream exceeds configured limit of %zu bytes\n", max_bytes);
+            return false;
+        }
+        bytes.insert(bytes.end(), buffer.begin(), buffer.begin() + count);
+    }
+    return load(bytes.data(), bytes.size());
+}
+
+bool CpioArchive::parse(const std::uint8_t* data, std::size_t size) {
+    entries_.clear();
+    next_node_id_ = 1;
+    next_order_ = 1;
+    next_inode_ = 1;
+    if (size == 0) {
+        return true;
+    }
+    if (data == nullptr) {
+        return false;
+    }
+
+    const auto* p = data;
     std::size_t off = 0;
-    const std::size_t total = data.size();
+    const std::size_t total = size;
+    if (total < sizeof(NewcHeader)) {
+        LOGE("Input is too small to contain a cpio archive\n");
+        return false;
+    }
+    bool saw_trailer = false;
 
     /* Reject LZ4 legacy ramdisk (unpack with --skip-decomp). Otherwise we might find "070701"
      * by chance in the stream and parse garbage as cpio → huge memory/cache and hang. */
@@ -354,19 +483,47 @@ bool CpioArchive::load(const std::string& path) {
 
         off += sizeof(NewcHeader);
         const std::uint32_t namesize = parse_hex8(h->namesize.data());
-        if (namesize == 0 || off + namesize > total) {
+        if (namesize == 0 || namesize > kCpioMaxPathSize ||
+            namesize > total - off) {
             LOGE("Invalid cpio namesize\n");
+            return false;
+        }
+        if (p[off + namesize - 1] != '\0') {
+            LOGE("Invalid cpio entry name terminator\n");
             return false;
         }
         std::string name(reinterpret_cast<const char*>(p + off), namesize > 0 ? namesize - 1 : 0);
         /* newc: pathname is namesize bytes, then NUL padding to 4-byte boundary (pos = align_4(pos)). */
         off += static_cast<std::size_t>(namesize);
         off = (off + 3) & ~static_cast<std::size_t>(3);
+        if (off > total) {
+            LOGE("Invalid cpio name padding\n");
+            return false;
+        }
+        const std::uint32_t filesize = parse_hex8(h->filesize.data());
+        if (filesize > total - off) {
+            LOGE("Invalid cpio filesize\n");
+            return false;
+        }
 
         if (name == "." || name == "..") {
+            saw_trailer = false;
+            off += static_cast<std::size_t>(filesize);
+            off = (off + 3) & ~static_cast<std::size_t>(3);
+            if (off > total) {
+                LOGE("Invalid cpio data padding\n");
+                return false;
+            }
             continue;
         }
         if (name == kTrailer) {
+            saw_trailer = true;
+            off += static_cast<std::size_t>(filesize);
+            off = (off + 3) & ~static_cast<std::size_t>(3);
+            if (off > total) {
+                LOGE("Invalid cpio trailer padding\n");
+                return false;
+            }
             /* Magisk: data[pos..].find(b"070701") => pos += x or break */
             const std::size_t search_max = total >= 6 ? total - 6 : 0;
             bool found = false;
@@ -382,52 +539,759 @@ bool CpioArchive::load(const std::string& path) {
             }
             continue;
         }
-
-        const std::uint32_t mode = parse_hex8(h->mode.data());
-        const std::uint32_t uid = parse_hex8(h->uid.data());
-        const std::uint32_t gid = parse_hex8(h->gid.data());
-        const std::uint32_t filesize = parse_hex8(h->filesize.data());
-        const std::uint32_t rdev_major = parse_hex8(h->rdevmajor.data());
-        const std::uint32_t rdev_minor = parse_hex8(h->rdevminor.data());
-        if (off + filesize > total) {
-            LOGE("Invalid cpio filesize\n");
+        saw_trailer = false;
+        CpioEntry entry;
+        entry.id = next_node_id_++;
+        entry.order = next_order_++;
+        entry.ino = parse_hex8(h->ino.data());
+        entry.mode = parse_hex8(h->mode.data());
+        entry.uid = parse_hex8(h->uid.data());
+        entry.gid = parse_hex8(h->gid.data());
+        entry.nlink = parse_hex8(h->nlink.data());
+        entry.mtime = parse_hex8(h->mtime.data());
+        entry.dev_major = parse_hex8(h->devmajor.data());
+        entry.dev_minor = parse_hex8(h->devminor.data());
+        entry.rdev_major = parse_hex8(h->rdevmajor.data());
+        entry.rdev_minor = parse_hex8(h->rdevminor.data());
+        entry.check = parse_hex8(h->check.data());
+        entry.data.assign(p + off, p + off + filesize);
+        if (entry.ino != std::numeric_limits<std::uint32_t>::max()) {
+            next_inode_ = std::max(next_inode_, entry.ino + 1);
+        }
+        const std::string normalized = normalize_path(name);
+        if (normalized.empty()) {
+            LOGE("Invalid empty cpio entry path\n");
             return false;
         }
-        CpioEntry entry;
-        entry.mode = mode;
-        entry.uid = uid;
-        entry.gid = gid;
-        entry.rdev_major = rdev_major;
-        entry.rdev_minor = rdev_minor;
-        entry.data.assign(p + off, p + off + filesize);
-        entries_[normalize_path(name)] = std::move(entry);
+        ensure_parent_directories(normalized);
+        if (entries_.size() >= kCpioMaxEntryCount) {
+            LOGE("cpio archive contains too many entries\n");
+            return false;
+        }
+        const auto existing = entries_.find(normalized);
+        if (existing != entries_.end() && existing->second.synthetic) {
+            entry.id = existing->second.id;
+        }
+        entries_[normalized] = std::move(entry);
         off += static_cast<std::size_t>(filesize);
         off = (off + 3) & ~static_cast<std::size_t>(3); /* align_4(pos) like Magisk */
+        if (off > total) {
+            LOGE("Invalid cpio data padding\n");
+            return false;
+        }
     }
 
+    if (!saw_trailer) {
+        LOGE("cpio archive is missing its trailer\n");
+        return false;
+    }
     return true;
 }
 
 bool CpioArchive::dump(const std::string& path) const {
-    int fd = xopen(path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0644);
+    mode_t mode = 0644;
+    struct stat existing {};
+    if (::stat(path.c_str(), &existing) == 0) {
+        mode = existing.st_mode & 07777;
+    }
+
+    std::string temporary_template = path + ".tmp.XXXXXX";
+    std::vector<char> temporary_path(
+        temporary_template.begin(), temporary_template.end());
+    temporary_path.push_back('\0');
+    const int fd = ::mkstemp(temporary_path.data());
     if (fd < 0) {
+        PLOGE("mkstemp %s", temporary_template.c_str());
         return false;
     }
-    owned_fd owned(fd);
+    bool success = ::fchmod(fd, mode) == 0 && dump_fd(fd) && ::fsync(fd) == 0;
+    if (::close(fd) != 0) {
+        success = false;
+    }
+    if (success && ::rename(temporary_path.data(), path.c_str()) == 0) {
+        return true;
+    }
+    if (success) {
+        PLOGE("rename %s", path.c_str());
+    }
+    ::unlink(temporary_path.data());
+    return false;
+}
 
-    std::uint32_t ino = 1;
+bool CpioArchive::dump_fd(int fd) const {
+    if (fd < 0) {
+        errno = EBADF;
+        return false;
+    }
+
+    std::vector<std::pair<std::string_view, const CpioEntry*>> ordered;
+    ordered.reserve(entries_.size());
     for (const auto& [name, entry] : entries_) {
-        if (!write_entry(fd, name, ino++, entry)) {
+        if (!entry.synthetic) {
+            ordered.emplace_back(name, &entry);
+        }
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.second->order < rhs.second->order;
+    });
+
+    for (const auto& [name, entry] : ordered) {
+        if (!write_entry(fd, name, *entry)) {
             PLOGE("write cpio entry");
             return false;
         }
     }
 
     CpioEntry trailer;
+    trailer.ino = next_inode_;
     trailer.mode = S_IFREG;
-    if (!write_entry(fd, kTrailer, ino, trailer)) {
+    trailer.nlink = 1;
+    if (!write_entry(fd, kTrailer, trailer)) {
         PLOGE("write cpio trailer");
         return false;
+    }
+    return true;
+}
+
+std::optional<std::string> CpioArchive::path_by_id(CpioNodeId id) const {
+    if (id == kCpioRootNodeId) {
+        return std::string{};
+    }
+    for (const auto& [path, entry] : entries_) {
+        if (entry.id == id) {
+            return path;
+        }
+    }
+    return std::nullopt;
+}
+
+CpioEntry* CpioArchive::entry_by_id(CpioNodeId id) {
+    if (id == kCpioRootNodeId) {
+        return nullptr;
+    }
+    for (auto& [_, entry] : entries_) {
+        if (entry.id == id) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+const CpioEntry* CpioArchive::entry_by_id(CpioNodeId id) const {
+    if (id == kCpioRootNodeId) {
+        return nullptr;
+    }
+    for (const auto& [_, entry] : entries_) {
+        if (entry.id == id) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+const CpioEntry* CpioArchive::content_entry(const CpioEntry& entry) const {
+    if (entry.nlink <= 1) {
+        return &entry;
+    }
+    for (const auto& [_, candidate] : entries_) {
+        if (candidate.ino == entry.ino &&
+            candidate.dev_major == entry.dev_major &&
+            candidate.dev_minor == entry.dev_minor &&
+            !candidate.data.empty()) {
+            return &candidate;
+        }
+    }
+    return &entry;
+}
+
+CpioEntry* CpioArchive::content_entry(CpioEntry& entry) {
+    return const_cast<CpioEntry*>(
+        static_cast<const CpioArchive*>(this)->content_entry(entry));
+}
+
+std::optional<CpioNodeId> CpioArchive::find(std::string_view path) const {
+    if (has_unsafe_path_segment(path)) {
+        return std::nullopt;
+    }
+    const std::string normalized = normalize_path(std::string(path));
+    if (normalized.empty()) {
+        return kCpioRootNodeId;
+    }
+    const auto it = entries_.find(normalized);
+    if (it == entries_.end()) {
+        return std::nullopt;
+    }
+    return it->second.id;
+}
+
+CpioNodeInfo CpioArchive::node_info(
+    const std::string& path,
+    const CpioEntry& entry) const {
+    CpioNodeInfo info;
+    info.id = entry.id;
+    info.path = path;
+    info.synthetic = entry.synthetic;
+    const auto separator = path.rfind('/');
+    const std::string parent_path =
+        separator == std::string::npos ? std::string{} : path.substr(0, separator);
+    info.name = separator == std::string::npos ? path : path.substr(separator + 1);
+    info.parent_id = find(parent_path).value_or(kCpioRootNodeId);
+    info.ino = entry.ino;
+    info.mode = entry.mode;
+    info.uid = entry.uid;
+    info.gid = entry.gid;
+    info.nlink = entry.nlink;
+    info.mtime = entry.mtime;
+    info.dev_major = entry.dev_major;
+    info.dev_minor = entry.dev_minor;
+    info.rdev_major = entry.rdev_major;
+    info.rdev_minor = entry.rdev_minor;
+    const CpioEntry* content = content_entry(entry);
+    info.size = content->data.size();
+    if ((entry.mode & S_IFMT) == S_IFLNK) {
+        info.link_target = std::string(content->data.begin(), content->data.end());
+    }
+    return info;
+}
+
+std::optional<CpioNodeInfo> CpioArchive::stat(CpioNodeId id) const {
+    if (id == kCpioRootNodeId) {
+        CpioNodeInfo root;
+        root.id = kCpioRootNodeId;
+        root.parent_id = kCpioRootNodeId;
+        root.mode = S_IFDIR | 0755U;
+        root.nlink = 2;
+        return root;
+    }
+    const auto path = path_by_id(id);
+    if (!path) {
+        return std::nullopt;
+    }
+    const auto it = entries_.find(*path);
+    if (it == entries_.end()) {
+        return std::nullopt;
+    }
+    return node_info(*path, it->second);
+}
+
+std::vector<CpioNodeInfo> CpioArchive::list(CpioNodeId directory_id) const {
+    const auto directory_path = path_by_id(directory_id);
+    if (!directory_path) {
+        return {};
+    }
+    if (directory_id != kCpioRootNodeId) {
+        const CpioEntry* directory = entry_by_id(directory_id);
+        if (directory == nullptr || (directory->mode & S_IFMT) != S_IFDIR) {
+            return {};
+        }
+    }
+
+    std::vector<CpioNodeInfo> result;
+    for (const auto& [path, entry] : entries_) {
+        const auto separator = path.rfind('/');
+        const std::string parent_path =
+            separator == std::string::npos ? std::string{} : path.substr(0, separator);
+        if (parent_path == *directory_path) {
+            result.push_back(node_info(path, entry));
+        }
+    }
+    std::sort(result.begin(), result.end(), [this](const auto& lhs, const auto& rhs) {
+        const CpioEntry* lhs_entry = entry_by_id(lhs.id);
+        const CpioEntry* rhs_entry = entry_by_id(rhs.id);
+        return lhs_entry != nullptr && rhs_entry != nullptr &&
+               lhs_entry->order < rhs_entry->order;
+    });
+    return result;
+}
+
+bool CpioArchive::read_content(CpioNodeId id, const CpioDataSink& sink) const {
+    const CpioEntry* entry = entry_by_id(id);
+    if (entry == nullptr || !sink) {
+        return false;
+    }
+    const auto& data = content_entry(*entry)->data;
+    constexpr std::size_t kChunkSize = 64U * 1024U;
+    std::size_t offset = 0;
+    while (offset < data.size()) {
+        const std::size_t count = std::min(kChunkSize, data.size() - offset);
+        if (!sink(data.data() + offset, count)) {
+            return false;
+        }
+        offset += count;
+    }
+    return true;
+}
+
+bool CpioArchive::replace_content(
+    CpioNodeId id,
+    const CpioDataSource& source,
+    std::size_t max_bytes) {
+    CpioEntry* entry = entry_by_id(id);
+    if (entry == nullptr || (entry->mode & S_IFMT) == S_IFDIR) {
+        return false;
+    }
+    std::vector<std::uint8_t> replacement;
+    if (!read_source(source, max_bytes, replacement)) {
+        return false;
+    }
+    CpioEntry* owner = content_entry(*entry);
+    if (entry->nlink > 1) {
+        for (auto& [_, candidate] : entries_) {
+            if (&candidate != owner &&
+                candidate.ino == entry->ino &&
+                candidate.dev_major == entry->dev_major &&
+                candidate.dev_minor == entry->dev_minor) {
+                candidate.data.clear();
+            }
+        }
+    }
+    owner->data = std::move(replacement);
+    owner->check = 0;
+    return true;
+}
+
+bool CpioArchive::update_metadata(CpioNodeId id, const CpioMetadataPatch& patch) {
+    CpioEntry* entry = entry_by_id(id);
+    if (entry == nullptr) {
+        return false;
+    }
+    if (patch.permissions) {
+        if ((*patch.permissions & ~07777U) != 0) {
+            return false;
+        }
+    }
+    materialize(*entry);
+    if (patch.permissions) {
+        entry->mode = (entry->mode & S_IFMT) | *patch.permissions;
+    }
+    if (patch.uid) {
+        entry->uid = *patch.uid;
+    }
+    if (patch.gid) {
+        entry->gid = *patch.gid;
+    }
+    if (patch.mtime) {
+        entry->mtime = *patch.mtime;
+    }
+    return true;
+}
+
+std::optional<std::string> CpioArchive::child_path(
+    CpioNodeId parent_id,
+    std::string_view name) const {
+    if (!is_valid_child_name(name)) {
+        return std::nullopt;
+    }
+    const auto parent_path = path_by_id(parent_id);
+    if (!parent_path) {
+        return std::nullopt;
+    }
+    if (parent_id != kCpioRootNodeId) {
+        const CpioEntry* parent = entry_by_id(parent_id);
+        if (parent == nullptr || (parent->mode & S_IFMT) != S_IFDIR) {
+            return std::nullopt;
+        }
+    }
+    return parent_path->empty() ? std::string(name) : *parent_path + "/" + std::string(name);
+}
+
+CpioEntry CpioArchive::make_entry(std::uint32_t mode) {
+    CpioEntry entry;
+    entry.id = next_node_id_++;
+    entry.order = next_order_++;
+    entry.ino = next_inode_;
+    if (next_inode_ != std::numeric_limits<std::uint32_t>::max()) {
+        ++next_inode_;
+    }
+    entry.mode = mode;
+    entry.nlink = (mode & S_IFMT) == S_IFDIR ? 2U : 1U;
+    return entry;
+}
+
+void CpioArchive::ensure_parent_directories(const std::string& path) {
+    std::size_t separator = path.find('/');
+    while (separator != std::string::npos) {
+        const std::string parent_path = path.substr(0, separator);
+        if (!parent_path.empty() && entries_.find(parent_path) == entries_.end()) {
+            CpioEntry parent;
+            parent.id = next_node_id_++;
+            parent.order = next_order_++;
+            parent.synthetic = true;
+            parent.mode = S_IFDIR | 0755U;
+            parent.nlink = 2;
+            entries_.emplace(parent_path, std::move(parent));
+        }
+        separator = path.find('/', separator + 1);
+    }
+}
+
+void CpioArchive::materialize(CpioEntry& entry) {
+    if (!entry.synthetic) {
+        return;
+    }
+    entry.synthetic = false;
+    entry.ino = next_inode_;
+    if (next_inode_ != std::numeric_limits<std::uint32_t>::max()) {
+        ++next_inode_;
+    }
+}
+
+bool CpioArchive::create_file(
+    CpioNodeId parent_id,
+    std::string_view name,
+    std::uint32_t permissions,
+    std::uint32_t uid,
+    std::uint32_t gid,
+    const CpioDataSource& source,
+    CpioNodeId* created_id,
+    std::size_t max_bytes) {
+    if ((permissions & ~07777U) != 0) {
+        return false;
+    }
+    const auto path = child_path(parent_id, name);
+    if (!path || entries_.find(*path) != entries_.end() ||
+        entries_.size() >= kCpioMaxEntryCount) {
+        return false;
+    }
+    std::vector<std::uint8_t> content;
+    if (!read_source(source, max_bytes, content)) {
+        return false;
+    }
+    CpioEntry entry = make_entry(S_IFREG | permissions);
+    entry.uid = uid;
+    entry.gid = gid;
+    entry.data = std::move(content);
+    const CpioNodeId id = entry.id;
+    entries_.emplace(*path, std::move(entry));
+    if (created_id != nullptr) {
+        *created_id = id;
+    }
+    return true;
+}
+
+bool CpioArchive::create_directory(
+    CpioNodeId parent_id,
+    std::string_view name,
+    std::uint32_t permissions,
+    std::uint32_t uid,
+    std::uint32_t gid,
+    CpioNodeId* created_id) {
+    if ((permissions & ~07777U) != 0) {
+        return false;
+    }
+    const auto path = child_path(parent_id, name);
+    if (!path) {
+        return false;
+    }
+    const auto existing = entries_.find(*path);
+    if (existing != entries_.end()) {
+        if (!existing->second.synthetic) {
+            return false;
+        }
+        CpioEntry& entry = existing->second;
+        materialize(entry);
+        entry.mode = S_IFDIR | permissions;
+        entry.uid = uid;
+        entry.gid = gid;
+        if (created_id != nullptr) {
+            *created_id = entry.id;
+        }
+        return true;
+    }
+    if (entries_.size() >= kCpioMaxEntryCount) {
+        return false;
+    }
+    CpioEntry entry = make_entry(S_IFDIR | permissions);
+    entry.uid = uid;
+    entry.gid = gid;
+    const CpioNodeId id = entry.id;
+    entries_.emplace(*path, std::move(entry));
+    if (created_id != nullptr) {
+        *created_id = id;
+    }
+    return true;
+}
+
+bool CpioArchive::create_symbolic_link(
+    CpioNodeId parent_id,
+    std::string_view name,
+    std::string_view target,
+    std::uint32_t uid,
+    std::uint32_t gid,
+    CpioNodeId* created_id) {
+    if (target.find('\0') != std::string_view::npos) {
+        return false;
+    }
+    const auto path = child_path(parent_id, name);
+    if (!path || entries_.find(*path) != entries_.end() ||
+        entries_.size() >= kCpioMaxEntryCount) {
+        return false;
+    }
+    CpioEntry entry = make_entry(S_IFLNK | 0777U);
+    entry.uid = uid;
+    entry.gid = gid;
+    entry.data.assign(target.begin(), target.end());
+    const CpioNodeId id = entry.id;
+    entries_.emplace(*path, std::move(entry));
+    if (created_id != nullptr) {
+        *created_id = id;
+    }
+    return true;
+}
+
+void CpioArchive::refresh_hard_link_count(
+    std::uint32_t ino,
+    std::uint32_t dev_major,
+    std::uint32_t dev_minor) {
+    std::uint32_t count = 0;
+    for (const auto& [_, entry] : entries_) {
+        if (entry.ino == ino &&
+            entry.dev_major == dev_major &&
+            entry.dev_minor == dev_minor &&
+            (entry.mode & S_IFMT) != S_IFDIR) {
+            ++count;
+        }
+    }
+    for (auto& [_, entry] : entries_) {
+        if (entry.ino == ino &&
+            entry.dev_major == dev_major &&
+            entry.dev_minor == dev_minor &&
+            (entry.mode & S_IFMT) != S_IFDIR) {
+            entry.nlink = std::max(1U, count);
+        }
+    }
+}
+
+bool CpioArchive::create_hard_link(
+    CpioNodeId parent_id,
+    std::string_view name,
+    CpioNodeId target_id,
+    CpioNodeId* created_id) {
+    const auto path = child_path(parent_id, name);
+    CpioEntry* target = entry_by_id(target_id);
+    if (!path || entries_.find(*path) != entries_.end() || target == nullptr ||
+        entries_.size() >= kCpioMaxEntryCount ||
+        (target->mode & S_IFMT) == S_IFDIR) {
+        return false;
+    }
+    CpioEntry entry = *target;
+    entry.id = next_node_id_++;
+    entry.order = next_order_++;
+    entry.data.clear();
+    const CpioNodeId id = entry.id;
+    const std::uint32_t ino = entry.ino;
+    const std::uint32_t dev_major = entry.dev_major;
+    const std::uint32_t dev_minor = entry.dev_minor;
+    entries_.emplace(*path, std::move(entry));
+    refresh_hard_link_count(ino, dev_major, dev_minor);
+    if (created_id != nullptr) {
+        *created_id = id;
+    }
+    return true;
+}
+
+bool CpioArchive::copy(
+    CpioNodeId id,
+    CpioNodeId destination_id,
+    std::string_view new_name,
+    CpioNodeId* created_id) {
+    const auto source_path = path_by_id(id);
+    const auto destination_path = child_path(destination_id, new_name);
+    if (!source_path || source_path->empty() || !destination_path ||
+        entries_.find(*destination_path) != entries_.end()) {
+        return false;
+    }
+    const std::string source_prefix = *source_path + "/";
+    if (destination_path->rfind(source_prefix, 0) == 0) {
+        return false;
+    }
+
+    std::vector<std::string> source_paths;
+    for (const auto& [path, _] : entries_) {
+        if (path == *source_path || path.rfind(source_prefix, 0) == 0) {
+            source_paths.push_back(path);
+        }
+    }
+    if (source_paths.empty()) {
+        return false;
+    }
+    if (source_paths.size() > kCpioMaxEntryCount - entries_.size()) {
+        return false;
+    }
+    std::sort(source_paths.begin(), source_paths.end(), [this](const auto& lhs, const auto& rhs) {
+        return entries_.at(lhs).order < entries_.at(rhs).order;
+    });
+
+    using LinkKey = std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>;
+    std::map<LinkKey, std::size_t> selected_link_counts;
+    for (const auto& path : source_paths) {
+        const CpioEntry& entry = entries_.at(path);
+        if (entry.nlink > 1 && (entry.mode & S_IFMT) != S_IFDIR) {
+            ++selected_link_counts[{entry.ino, entry.dev_major, entry.dev_minor}];
+        }
+    }
+
+    std::vector<std::pair<std::string, CpioEntry>> copies;
+    copies.reserve(source_paths.size());
+    std::map<LinkKey, std::uint32_t> copied_inodes;
+    std::map<LinkKey, std::size_t> copied_link_owner;
+    std::map<LinkKey, std::vector<std::uint8_t>> copied_link_content;
+
+    for (const auto& old_path : source_paths) {
+        const CpioEntry& original = entries_.at(old_path);
+        const std::string suffix = old_path.substr(source_path->size());
+        const std::string new_path = *destination_path + suffix;
+        if (entries_.find(new_path) != entries_.end()) {
+            return false;
+        }
+
+        CpioEntry copy = original;
+        CpioEntry identity = make_entry(copy.mode);
+        copy.id = identity.id;
+        copy.order = identity.order;
+        const bool is_directory = (copy.mode & S_IFMT) == S_IFDIR;
+        const LinkKey key{copy.ino, copy.dev_major, copy.dev_minor};
+        const auto count_it = selected_link_counts.find(key);
+        const std::size_t selected_count =
+            count_it == selected_link_counts.end() ? 0 : count_it->second;
+
+        if (!is_directory && selected_count > 1) {
+            const auto inode_it = copied_inodes.find(key);
+            if (inode_it == copied_inodes.end()) {
+                copied_inodes.emplace(key, identity.ino);
+                copy.ino = identity.ino;
+                copied_link_content.emplace(key, content_entry(original)->data);
+            } else {
+                copy.ino = inode_it->second;
+            }
+            copy.nlink = static_cast<std::uint32_t>(selected_count);
+            copy.data.clear();
+            copied_link_owner[key] = copies.size();
+        } else {
+            copy.ino = identity.ino;
+            copy.nlink = is_directory ? 2U : 1U;
+            if (!is_directory) {
+                copy.data = content_entry(original)->data;
+            }
+        }
+        copies.emplace_back(new_path, std::move(copy));
+    }
+
+    for (const auto& [key, owner_index] : copied_link_owner) {
+        copies[owner_index].second.data = std::move(copied_link_content[key]);
+    }
+
+    const CpioNodeId root_copy_id = copies.front().second.id;
+    for (auto& [path, entry] : copies) {
+        entries_.emplace(std::move(path), std::move(entry));
+    }
+    if (created_id != nullptr) {
+        *created_id = root_copy_id;
+    }
+    return true;
+}
+
+bool CpioArchive::remove(CpioNodeId id, bool recursive) {
+    const auto path = path_by_id(id);
+    CpioEntry* entry = entry_by_id(id);
+    if (!path || path->empty() || entry == nullptr) {
+        return false;
+    }
+    const std::string prefix = *path + "/";
+    const bool has_children = std::any_of(entries_.begin(), entries_.end(), [&](const auto& item) {
+        return item.first.rfind(prefix, 0) == 0;
+    });
+    if (has_children && !recursive) {
+        return false;
+    }
+    using LinkKey = std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>;
+    std::set<LinkKey> affected_links;
+    std::map<LinkKey, std::vector<std::uint8_t>> affected_content;
+    for (const auto& [candidate_path, candidate] : entries_) {
+        if (candidate_path != *path &&
+            (!recursive || candidate_path.rfind(prefix, 0) != 0)) {
+            continue;
+        }
+        if (candidate.nlink > 1 && (candidate.mode & S_IFMT) != S_IFDIR) {
+            const LinkKey key{
+                candidate.ino, candidate.dev_major, candidate.dev_minor};
+            affected_links.insert(key);
+            affected_content.emplace(key, content_entry(candidate)->data);
+        }
+    }
+    for (auto it = entries_.begin(); it != entries_.end();) {
+        if (it->first == *path || (recursive && it->first.rfind(prefix, 0) == 0)) {
+            it = entries_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (const auto& key : affected_links) {
+        const auto [ino, dev_major, dev_minor] = key;
+        CpioEntry* surviving_entry = nullptr;
+        bool has_content = false;
+        for (auto& [_, candidate] : entries_) {
+            if (candidate.ino == ino &&
+                candidate.dev_major == dev_major &&
+                candidate.dev_minor == dev_minor &&
+                (candidate.mode & S_IFMT) != S_IFDIR) {
+                if (surviving_entry == nullptr) {
+                    surviving_entry = &candidate;
+                }
+                has_content = has_content || !candidate.data.empty();
+            }
+        }
+        if (surviving_entry != nullptr && !has_content) {
+            surviving_entry->data = std::move(affected_content[key]);
+        }
+        refresh_hard_link_count(ino, dev_major, dev_minor);
+    }
+    return true;
+}
+
+bool CpioArchive::move(
+    CpioNodeId id,
+    CpioNodeId destination_id,
+    std::string_view new_name) {
+    const auto source_path = path_by_id(id);
+    const auto destination_path = child_path(destination_id, new_name);
+    if (!source_path || source_path->empty() || !destination_path) {
+        return false;
+    }
+    if (*source_path == *destination_path) {
+        return true;
+    }
+    const std::string source_prefix = *source_path + "/";
+    if (destination_path->rfind(source_prefix, 0) == 0) {
+        return false;
+    }
+
+    std::set<std::string> moving_paths;
+    for (const auto& [path, _] : entries_) {
+        if (path == *source_path || path.rfind(source_prefix, 0) == 0) {
+            moving_paths.insert(path);
+        }
+    }
+    if (moving_paths.empty()) {
+        return false;
+    }
+
+    std::vector<std::pair<std::string, CpioEntry>> moved;
+    moved.reserve(moving_paths.size());
+    for (const auto& old_path : moving_paths) {
+        const std::string suffix = old_path.substr(source_path->size());
+        const std::string new_path = *destination_path + suffix;
+        const auto collision = entries_.find(new_path);
+        if (collision != entries_.end() && moving_paths.find(new_path) == moving_paths.end()) {
+            return false;
+        }
+        moved.emplace_back(new_path, entries_.at(old_path));
+    }
+    for (const auto& old_path : moving_paths) {
+        entries_.erase(old_path);
+    }
+    for (auto& [new_path, entry] : moved) {
+        entries_.emplace(std::move(new_path), std::move(entry));
     }
     return true;
 }
@@ -456,66 +1320,77 @@ bool CpioArchive::add(std::uint32_t mode, std::string_view cpio_path, const std:
     }
     std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
 
-    CpioEntry entry;
-    entry.mode = (mode & 07777U) | S_IFREG;
+    const std::string path = normalize_path(std::string(cpio_path));
+    if (path.empty()) {
+        return false;
+    }
+    CpioEntry entry = make_entry((mode & 07777U) | S_IFREG);
     entry.uid = 0;
     entry.gid = 0;
     entry.data = std::move(data);
-    entries_[normalize_path(std::string(cpio_path))] = std::move(entry);
+    const auto existing = entries_.find(path);
+    if (existing != entries_.end()) {
+        entry.id = existing->second.id;
+        entry.order = existing->second.order;
+        entry.ino = existing->second.ino;
+    }
+    entries_[path] = std::move(entry);
     return true;
 }
 
 bool CpioArchive::mkdir(std::uint32_t mode, const std::string& path) {
-    CpioEntry entry;
-    entry.mode = (mode & 07777U) | S_IFDIR;
+    const std::string normalized = normalize_path(path);
+    if (normalized.empty()) {
+        return false;
+    }
+    CpioEntry entry = make_entry((mode & 07777U) | S_IFDIR);
     entry.uid = 0;
     entry.gid = 0;
     entry.data.clear();
-    entries_[normalize_path(path)] = std::move(entry);
+    const auto existing = entries_.find(normalized);
+    if (existing != entries_.end()) {
+        entry.id = existing->second.id;
+        entry.order = existing->second.order;
+        entry.ino = existing->second.ino;
+    }
+    entries_[normalized] = std::move(entry);
     return true;
 }
 
 bool CpioArchive::rm(const std::string& path, bool recursive) {
-    const auto norm = normalize_path(path);
-    bool removed = entries_.erase(norm) > 0;
-    if (!recursive) {
-        return removed;
-    }
-    const auto prefix = norm + "/";
-    for (auto it = entries_.begin(); it != entries_.end();) {
-        if (it->first.rfind(prefix, 0) == 0) {
-            it = entries_.erase(it);
-            removed = true;
-        } else {
-            ++it;
-        }
-    }
-    return removed;
+    const auto id = find(path);
+    return id && *id != kCpioRootNodeId && remove(*id, recursive);
 }
 
 bool CpioArchive::mv(const std::string& from, const std::string& to) {
     const auto from_norm = normalize_path(from);
     const auto to_norm = normalize_path(to);
-    auto it = entries_.find(from_norm);
-    if (it == entries_.end()) {
+    const auto source_id = find(from_norm);
+    if (!source_id || *source_id == kCpioRootNodeId || to_norm.empty()) {
         return false;
     }
-    entries_[to_norm] = std::move(it->second);
-    entries_.erase(it);
-    return true;
+    const auto separator = to_norm.rfind('/');
+    const std::string parent_path =
+        separator == std::string::npos ? std::string{} : to_norm.substr(0, separator);
+    const std::string name =
+        separator == std::string::npos ? to_norm : to_norm.substr(separator + 1);
+    const auto parent_id = find(parent_path);
+    return parent_id && move(*source_id, *parent_id, name);
 }
 
 bool CpioArchive::ln(const std::string& src, const std::string& dst) {
-    CpioEntry entry;
-    entry.mode = S_IFLNK;
-    entry.uid = 0;
-    entry.gid = 0;
-    entry.rdev_major = 0;
-    entry.rdev_minor = 0;
-    const auto src_norm = normalize_path(src);
-    entry.data.assign(src_norm.begin(), src_norm.end());
-    entries_[normalize_path(dst)] = std::move(entry);
-    return true;
+    const std::string destination = normalize_path(dst);
+    if (destination.empty()) {
+        return false;
+    }
+    const auto separator = destination.rfind('/');
+    const std::string parent_path =
+        separator == std::string::npos ? std::string{} : destination.substr(0, separator);
+    const std::string name =
+        separator == std::string::npos ? destination : destination.substr(separator + 1);
+    const auto parent_id = find(parent_path);
+    return parent_id &&
+           create_symbolic_link(*parent_id, name, src, 0, 0);
 }
 
 void CpioArchive::ls(const std::string& path, bool recursive) const {
@@ -659,8 +1534,19 @@ bool CpioArchive::backup(const std::string& origin, bool skip_compress) {
 
     std::string rm_list;
     std::map<std::string, CpioEntry> backups;
+    const auto prepare_backup_entry = [this](CpioEntry entry) {
+        CpioEntry identity = make_entry(entry.mode);
+        entry.id = identity.id;
+        entry.order = identity.order;
+        entry.ino = identity.ino;
+        entry.nlink = (entry.mode & S_IFMT) == S_IFDIR ? 2U : 1U;
+        return entry;
+    };
 
     for (const auto& [name, orig_entry] : orig_archive.entries_) {
+        if (orig_entry.synthetic) {
+            continue;
+        }
         const auto it = entries_.find(name);
         if (it == entries_.end() || it->second.data != orig_entry.data || it->second.mode != orig_entry.mode) {
             const std::string backup_name = std::string(".backup/") + name;
@@ -669,32 +1555,33 @@ bool CpioArchive::backup(const std::string& origin, bool skip_compress) {
                 if (transcode_xz(orig_entry.data, compressed, true)) {
                     CpioEntry compressed_entry = orig_entry;
                     compressed_entry.data = std::move(compressed);
-                    backups[backup_name + ".xz"] = std::move(compressed_entry);
+                    backups[backup_name + ".xz"] =
+                        prepare_backup_entry(std::move(compressed_entry));
                     continue;
                 }
             }
-            backups[backup_name] = orig_entry;
+            backups[backup_name] = prepare_backup_entry(orig_entry);
         }
     }
 
-    for (const auto& [name, _] : entries_) {
+    for (const auto& [name, entry] : entries_) {
+        if (entry.synthetic) {
+            continue;
+        }
         if (orig_archive.entries_.find(name) == orig_archive.entries_.end()) {
             rm_list += name;
             rm_list.push_back('\0');
         }
     }
 
-    CpioEntry backup_dir;
-    backup_dir.mode = S_IFDIR;
+    CpioEntry backup_dir = make_entry(S_IFDIR | 0755U);
     backups[".backup"] = backup_dir;
 
-    CpioEntry magisk_marker;
-    magisk_marker.mode = S_IFREG;
+    CpioEntry magisk_marker = make_entry(S_IFREG | 0644U);
     backups[".backup/.magisk"] = magisk_marker;
 
     if (!rm_list.empty()) {
-        CpioEntry rmlist_entry;
-        rmlist_entry.mode = S_IFREG;
+        CpioEntry rmlist_entry = make_entry(S_IFREG | 0644U);
         rmlist_entry.data.assign(rm_list.begin(), rm_list.end());
         backups[".backup/.rmlist"] = std::move(rmlist_entry);
     }
@@ -762,6 +1649,15 @@ bool CpioArchive::restore() {
 
     rm(".backup", true);
     for (auto& [target, entry] : restore_entries) {
+        const auto existing = entries_.find(target);
+        if (existing != entries_.end()) {
+            entry.id = existing->second.id;
+            entry.order = existing->second.order;
+        } else {
+            CpioEntry identity = make_entry(entry.mode);
+            entry.id = identity.id;
+            entry.order = identity.order;
+        }
         entries_[target] = std::move(entry);
     }
     return true;
