@@ -72,6 +72,10 @@ public:
     bool load_fd(int fd, std::size_t max_bytes = kCpioDefaultMaxContentSize);
     [[nodiscard]] bool dump(const std::string& path) const;
     [[nodiscard]] bool dump_fd(int fd) const;
+    [[nodiscard]] bool dump(const CpioDataSink& sink) const;
+    [[nodiscard]] bool dump(
+        std::vector<std::uint8_t>& output,
+        std::size_t max_bytes = kCpioDefaultMaxContentSize) const;
 
     [[nodiscard]] std::optional<CpioNodeId> find(std::string_view path) const;
     [[nodiscard]] std::optional<CpioNodeInfo> stat(CpioNodeId id) const;

@@ -1,5 +1,6 @@
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 #include <cstdlib>
@@ -254,7 +255,7 @@ boot_img::boot_img(const char* image)
             break;
         }
     }
-    exit(RETURN_ERROR);
+    throw std::runtime_error("unsupported or invalid boot image");
 }
 
 boot_img::~boot_img() {
@@ -468,7 +469,7 @@ boot_img::vendor_ramdisk_table_view boot_img::vendor_ramdisk_tbl() const {
     if (hdr->vendor_ramdisk_table_entry_size() != sizeof(table_entry)) {
         fprintf(stdout, "! Invalid vendor image: vendor_ramdisk_table_entry_size != %zu\n",
                 sizeof(table_entry));
-        exit(RETURN_ERROR);
+        throw std::runtime_error("invalid vendor ramdisk table");
     }
     return {
         reinterpret_cast<table_entry*>(const_cast<uint8_t*>(vendor_ramdisk_table)),
@@ -640,16 +641,35 @@ bool boot_img::parse_image(const uint8_t* addr, FileFormat type) {
             flags[AVB1_SIGNED_FLAG] = true;
         }
 
-        // Find AVB footer
-        const void* footer = tail.data() + tail.size() - sizeof(AvbFooter);
-        if (BUFFER_MATCH(footer, AVB_FOOTER_MAGIC)) {
-            avb_footer = static_cast<const AvbFooter*>(footer);
-            // Double check if meta header exists
-            const void* meta = payload.data() + __builtin_bswap64(avb_footer->vbmeta_offset);
-            if (BUFFER_MATCH(meta, AVB_MAGIC)) {
-                fprintf(stdout, "VBMETA\n");
-                flags[AVB_FLAG] = true;
-                vbmeta = static_cast<const AvbVBMetaImageHeader*>(meta);
+        // Find an AVB footer at the real file end, then validate its
+        // attacker-controlled metadata range before dereferencing it.
+        if (map.size() >= sizeof(AvbFooter)) {
+            const auto* footer = reinterpret_cast<const AvbFooter*>(
+                map.data() + map.size() - sizeof(AvbFooter));
+            if (BUFFER_MATCH(footer, AVB_FOOTER_MAGIC)) {
+                const std::uint64_t meta_offset =
+                    __builtin_bswap64(footer->vbmeta_offset);
+                const std::uint64_t meta_size =
+                    __builtin_bswap64(footer->vbmeta_size);
+                const std::size_t payload_offset =
+                    static_cast<std::size_t>(
+                        payload.data() - map.data());
+                if (payload_offset <= map.size() &&
+                    meta_offset <= map.size() - payload_offset &&
+                    meta_size >= sizeof(AvbVBMetaImageHeader) &&
+                    meta_size <=
+                        map.size() - payload_offset - meta_offset) {
+                    const auto* meta =
+                        payload.data() +
+                        static_cast<std::size_t>(meta_offset);
+                    if (BUFFER_MATCH(meta, AVB_MAGIC)) {
+                        fprintf(stdout, "VBMETA\n");
+                        flags[AVB_FLAG] = true;
+                        avb_footer = footer;
+                        vbmeta = reinterpret_cast<
+                            const AvbVBMetaImageHeader*>(meta);
+                    }
+                }
             }
         }
     }

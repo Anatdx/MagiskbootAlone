@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -54,8 +55,29 @@ std::unique_ptr<SHA> get_sha(bool use_sha1);
 void sha256_hash(byte_view data, byte_data out);
 
 // Compression helpers (gzip/lz4, and optional xz when built with liblzma).
+using BootByteSink =
+    std::function<bool(const std::uint8_t*, std::size_t)>;
+
 void compress_bytes(FileFormat format, byte_view in_bytes, int out_fd);
 void decompress_bytes(FileFormat format, byte_view in_bytes, int out_fd);
+[[nodiscard]] bool compress_bytes(
+    FileFormat format,
+    byte_view in_bytes,
+    const BootByteSink& sink);
+[[nodiscard]] bool decompress_bytes(
+    FileFormat format,
+    byte_view in_bytes,
+    const BootByteSink& sink);
+[[nodiscard]] bool compress_bytes(
+    FileFormat format,
+    byte_view in_bytes,
+    std::vector<std::uint8_t>& output,
+    std::size_t max_output_size);
+[[nodiscard]] bool decompress_bytes(
+    FileFormat format,
+    byte_view in_bytes,
+    std::vector<std::uint8_t>& output,
+    std::size_t max_output_size);
 
 // Format helpers
 const char *fmt2name(FileFormat fmt);

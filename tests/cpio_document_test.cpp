@@ -1,5 +1,9 @@
 #include "cpio.hpp"
+#include "boot_ramdisk.hpp"
+#include "boot_crypto.hpp"
+#include "bootimg.hpp"
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <algorithm>
@@ -7,6 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -40,6 +45,14 @@ void format_hex8(char* output, std::uint32_t value) {
 
 void pad4(std::vector<std::uint8_t>& output) {
     while ((output.size() & 3U) != 0) {
+        output.push_back(0);
+    }
+}
+
+void pad_to(
+    std::vector<std::uint8_t>& output,
+    std::size_t alignment) {
+    while ((output.size() % alignment) != 0) {
         output.push_back(0);
     }
 }
@@ -109,6 +122,27 @@ CpioDataSource source_from(std::string value) {
         offset += count;
         return static_cast<ssize_t>(count);
     };
+}
+
+bool write_file(
+    const char* path,
+    const std::vector<std::uint8_t>& bytes) {
+    const int fd = ::open(
+        path, O_WRONLY | O_TRUNC | O_CLOEXEC);
+    if (fd < 0) {
+        return false;
+    }
+    std::size_t offset = 0;
+    while (offset < bytes.size()) {
+        const ssize_t count =
+            ::write(fd, bytes.data() + offset, bytes.size() - offset);
+        if (count <= 0) {
+            ::close(fd);
+            return false;
+        }
+        offset += static_cast<std::size_t>(count);
+    }
+    return ::close(fd) == 0;
 }
 
 std::string read_all(const CpioArchive& archive, CpioNodeId id, bool& success) {
@@ -222,12 +256,26 @@ bool document_round_trip_test() {
     CHECK(read_all(document, *copied_tool2, read_ok) == "replacement");
     CHECK(read_ok);
 
+    std::vector<std::uint8_t> streamed_archive;
+    CHECK(document.dump(streamed_archive));
+    CpioDocument streamed_reload;
+    CHECK(streamed_reload.load(
+        streamed_archive.data(), streamed_archive.size()));
+    CHECK(streamed_reload.find("sbin/tool") != std::nullopt);
+    const std::vector<std::uint8_t> unchanged_output = {1, 2, 3};
+    streamed_archive = unchanged_output;
+    CHECK(!document.dump(streamed_archive, 16));
+    CHECK(streamed_archive == unchanged_output);
+
     std::array<char, 64> temporary_path{};
     std::snprintf(temporary_path.data(), temporary_path.size(), "/tmp/cpio-document-test-XXXXXX");
     const int temporary_fd = mkstemp(temporary_path.data());
     CHECK(temporary_fd >= 0);
     ::close(temporary_fd);
     CHECK(document.dump(temporary_path.data()));
+    CHECK(cpio_commands(
+              temporary_path.data(),
+              {"exists sbin/tool"}) == 0);
 
     CpioDocument reloaded;
     const bool loaded = reloaded.load(temporary_path.data());
@@ -274,8 +322,136 @@ bool recursive_remove_updates_hard_links_test() {
     return true;
 }
 
+bool compression_memory_stream_test() {
+    const auto input = make_archive();
+    const std::array<FileFormat, 4> formats = {
+        FileFormat::GZIP,
+        FileFormat::LZ4,
+        FileFormat::LZ4_LEGACY,
+        FileFormat::XZ,
+    };
+    for (const FileFormat format : formats) {
+        std::vector<std::uint8_t> compressed;
+        CHECK(compress_bytes(
+            format,
+            byte_view(input.data(), input.size()),
+            compressed,
+            kCpioDefaultMaxContentSize));
+        CHECK(!compressed.empty());
+
+        std::vector<std::uint8_t> decompressed;
+        CHECK(decompress_bytes(
+            format,
+            byte_view(compressed.data(), compressed.size()),
+            decompressed,
+            kCpioDefaultMaxContentSize));
+        CHECK(decompressed == input);
+
+        const std::vector<std::uint8_t> unchanged = {9, 8, 7};
+        decompressed = unchanged;
+        CHECK(!decompress_bytes(
+            format,
+            byte_view(compressed.data(), compressed.size()),
+            decompressed,
+            16));
+        CHECK(decompressed == unchanged);
+
+        compressed.resize(compressed.size() / 2);
+        decompressed = unchanged;
+        CHECK(!decompress_bytes(
+            format,
+            byte_view(compressed.data(), compressed.size()),
+            decompressed,
+            kCpioDefaultMaxContentSize));
+        CHECK(decompressed == unchanged);
+    }
+    return true;
+}
+
+bool boot_ramdisk_document_test() {
+    const auto cpio = make_archive();
+    std::vector<std::uint8_t> packed_ramdisk;
+    CHECK(compress_bytes(
+        FileFormat::LZ4_LEGACY,
+        byte_view(cpio.data(), cpio.size()),
+        packed_ramdisk,
+        kCpioDefaultMaxContentSize));
+
+    boot_img_hdr_v4 header{};
+    std::memcpy(
+        header.magic.data(), BOOT_MAGIC, BOOT_MAGIC_SIZE);
+    header.ramdisk_size =
+        static_cast<std::uint32_t>(packed_ramdisk.size());
+    header.header_size = sizeof(header);
+    header.header_version = 4;
+
+    constexpr std::size_t kPageSize = 4096;
+    std::vector<std::uint8_t> source(kPageSize, 0);
+    std::memcpy(source.data(), &header, sizeof(header));
+    source.insert(
+        source.end(), packed_ramdisk.begin(), packed_ramdisk.end());
+    pad_to(source, kPageSize);
+
+    std::array<char, 64> source_path{};
+    std::array<char, 64> output_path{};
+    std::snprintf(
+        source_path.data(),
+        source_path.size(),
+        "/tmp/boot-ramdisk-source-XXXXXX");
+    std::snprintf(
+        output_path.data(),
+        output_path.size(),
+        "/tmp/boot-ramdisk-output-XXXXXX");
+    const int source_fd = ::mkstemp(source_path.data());
+    const int output_fd = ::mkstemp(output_path.data());
+    CHECK(source_fd >= 0);
+    CHECK(output_fd >= 0);
+    ::close(source_fd);
+    ::close(output_fd);
+    CHECK(write_file(source_path.data(), source));
+
+    BootRamdiskDocument document;
+    CHECK(document.load(source_path.data()));
+    CHECK(document.info().header_version == 4);
+    CHECK(document.info().compression == FileFormat::LZ4_LEGACY);
+    CHECK(!document.info().has_kernel);
+    CHECK(!document.info().has_avb_footer);
+    const auto tool_id = document.ramdisk().find("system/bin/tool");
+    CHECK(tool_id);
+    CHECK(document.ramdisk().replace_content(
+        *tool_id, source_from("boot-edit")));
+    CHECK(!document.load("/definitely/missing/boot.img"));
+    CHECK(document.loaded());
+    CHECK(document.ramdisk().find("system/bin/tool") == tool_id);
+    CHECK(write_file(
+        output_path.data(), std::vector<std::uint8_t>(128, 0)));
+    CHECK(!document.load(output_path.data()));
+    CHECK(document.loaded());
+    CHECK(document.dump(output_path.data()));
+
+    BootRamdiskDocument reloaded;
+    CHECK(reloaded.load(output_path.data()));
+    const auto reloaded_tool =
+        reloaded.ramdisk().find("system/bin/tool");
+    CHECK(reloaded_tool);
+    bool read_ok = false;
+    CHECK(read_all(
+              reloaded.ramdisk(), *reloaded_tool, read_ok) ==
+          "boot-edit");
+    CHECK(read_ok);
+
+    ::unlink(source_path.data());
+    ::unlink(output_path.data());
+    return true;
+}
+
 }  // namespace
 
 int main() {
-    return document_round_trip_test() && recursive_remove_updates_hard_links_test() ? 0 : 1;
+    return document_round_trip_test() &&
+                   recursive_remove_updates_hard_links_test() &&
+                   compression_memory_stream_test() &&
+                   boot_ramdisk_document_test()
+               ? 0
+               : 1;
 }

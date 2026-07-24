@@ -107,6 +107,7 @@ message(STATUS "magiskboot: using mbedTLS for SHA and AVB")
 
 set(MAGISKBOOT_CORE_SOURCES
   src/base_host.cpp
+  src/boot_ramdisk.cpp
   src/bootimg.cpp
   src/boot_crypto.cpp
   src/cpio.cpp

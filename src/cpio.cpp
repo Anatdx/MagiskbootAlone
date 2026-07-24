@@ -63,19 +63,6 @@ std::uint32_t align4(std::uint32_t v) {
     return (v + 3U) & ~3U;
 }
 
-bool write_all(int fd, const void* data, std::size_t len) {
-    const auto* p = static_cast<const std::uint8_t*>(data);
-    std::size_t done = 0;
-    while (done < len) {
-        const ssize_t n = ::write(fd, p + done, len - done);
-        if (n <= 0) {
-            return false;
-        }
-        done += static_cast<std::size_t>(n);
-    }
-    return true;
-}
-
 void format_hex8(char* out, std::uint32_t v) {
     std::array<char, 9> tmp = {};
     const int ret = std::snprintf(tmp.data(), tmp.size(), "%08x", v);
@@ -84,7 +71,10 @@ void format_hex8(char* out, std::uint32_t v) {
     }
 }
 
-bool write_entry(int fd, std::string_view entry_name, const CpioEntry& entry) {
+bool write_entry(
+    const CpioDataSink& sink,
+    std::string_view entry_name,
+    const CpioEntry& entry) {
     if (entry_name.size() >= std::numeric_limits<std::uint32_t>::max() ||
         entry.data.size() > std::numeric_limits<std::uint32_t>::max()) {
         LOGE("cpio entry is too large to encode: %.*s\n",
@@ -108,10 +98,13 @@ bool write_entry(int fd, std::string_view entry_name, const CpioEntry& entry) {
     format_hex8(h.namesize.data(), static_cast<std::uint32_t>(entry_name.size() + 1));
     format_hex8(h.check.data(), entry.check);
 
-    if (!write_all(fd, &h, sizeof(h))) {
+    if (!sink(reinterpret_cast<const std::uint8_t*>(&h), sizeof(h))) {
         return false;
     }
-    if (!write_all(fd, entry_name.data(), entry_name.size()) || !write_all(fd, "\0", 1)) {
+    if (!sink(
+            reinterpret_cast<const std::uint8_t*>(entry_name.data()),
+            entry_name.size()) ||
+        !sink(reinterpret_cast<const std::uint8_t*>("\0"), 1)) {
         return false;
     }
     /* Pad so next header is at align_4(sizeof(NewcHeader) + namesize), matching load(). */
@@ -121,18 +114,19 @@ bool write_entry(int fd, std::string_view entry_name, const CpioEntry& entry) {
     const std::uint32_t name_pad_len = next_aligned - pos_after_name;
     if (name_pad_len != 0) {
         const std::array<std::uint8_t, 3> zeros = {0, 0, 0};
-        if (!write_all(fd, zeros.data(), name_pad_len)) {
+        if (!sink(zeros.data(), name_pad_len)) {
             return false;
         }
     }
-    if (!entry.data.empty() && !write_all(fd, entry.data.data(), entry.data.size())) {
+    if (!entry.data.empty() &&
+        !sink(entry.data.data(), entry.data.size())) {
         return false;
     }
     const std::uint32_t data_pad =
         align4(static_cast<std::uint32_t>(entry.data.size())) - static_cast<std::uint32_t>(entry.data.size());
     if (data_pad != 0) {
         const std::array<std::uint8_t, 3> zeros = {0, 0, 0};
-        if (!write_all(fd, zeros.data(), data_pad)) {
+        if (!sink(zeros.data(), data_pad)) {
             return false;
         }
     }
@@ -624,6 +618,27 @@ bool CpioArchive::dump_fd(int fd) const {
         return false;
     }
 
+    return dump([fd](const std::uint8_t* data, std::size_t size) {
+        std::size_t offset = 0;
+        while (offset < size) {
+            const ssize_t count = ::write(fd, data + offset, size - offset);
+            if (count < 0 && errno == EINTR) {
+                continue;
+            }
+            if (count <= 0) {
+                return false;
+            }
+            offset += static_cast<std::size_t>(count);
+        }
+        return true;
+    });
+}
+
+bool CpioArchive::dump(const CpioDataSink& sink) const {
+    if (!sink) {
+        return false;
+    }
+
     std::vector<std::pair<std::string_view, const CpioEntry*>> ordered;
     ordered.reserve(entries_.size());
     for (const auto& [name, entry] : entries_) {
@@ -636,8 +651,8 @@ bool CpioArchive::dump_fd(int fd) const {
     });
 
     for (const auto& [name, entry] : ordered) {
-        if (!write_entry(fd, name, *entry)) {
-            PLOGE("write cpio entry");
+        if (!write_entry(sink, name, *entry)) {
+            LOGE("Failed to stream cpio entry\n");
             return false;
         }
     }
@@ -646,10 +661,30 @@ bool CpioArchive::dump_fd(int fd) const {
     trailer.ino = next_inode_;
     trailer.mode = S_IFREG;
     trailer.nlink = 1;
-    if (!write_entry(fd, kTrailer, trailer)) {
-        PLOGE("write cpio trailer");
+    if (!write_entry(sink, kTrailer, trailer)) {
+        LOGE("Failed to stream cpio trailer\n");
         return false;
     }
+    return true;
+}
+
+bool CpioArchive::dump(
+    std::vector<std::uint8_t>& output,
+    std::size_t max_bytes) const {
+    std::vector<std::uint8_t> replacement;
+    const bool success = dump(
+        [&](const std::uint8_t* data, std::size_t size) {
+            if (replacement.size() > max_bytes ||
+                size > max_bytes - replacement.size()) {
+                return false;
+            }
+            replacement.insert(replacement.end(), data, data + size);
+            return true;
+        });
+    if (!success) {
+        return false;
+    }
+    output = std::move(replacement);
     return true;
 }
 

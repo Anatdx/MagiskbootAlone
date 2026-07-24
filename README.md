@@ -13,6 +13,8 @@ Boot image unpack/repack/split-dtb logic is derived from [Magisk](https://github
 - **Hashing & AVB**: SHA-1 / SHA-256 and AVB verify/sign via **mbedTLS** (no OpenSSL, no picosha2)
 - **CPIO document API**: stable node IDs, complete newc metadata, streamed content,
   recursive moves, Unix metadata editing, symbolic links, and hard links
+- **No-shards boot ramdisk API**: open a standard v3/v4 boot or init_boot image,
+  edit its in-memory CPIO, and rebuild it without an unpack directory
 
 ## Embedded CPIO document API
 
@@ -40,10 +42,28 @@ preserves inode/link information, timestamps, device metadata, and archive
 order during a load/edit/dump cycle. Path-based CLI commands remain available
 for compatibility, but new embedders should use the node API.
 
+`src/boot_ramdisk.hpp` connects that document directly to modern standard AOSP
+boot images:
+
+```cpp
+BootRamdiskDocument image;
+image.load("init_boot.img");
+
+CpioDocument& ramdisk = image.ramdisk();
+// Use the same stable-node and streamed-content operations shown above.
+
+image.dump("new-init_boot.img");
+```
+
+The no-shards path currently accepts standard AOSP boot/init_boot header v3-v4
+images with a single CPIO ramdisk. It retains the source compression and
+supported AVB footer layout. The source can also be rebuilt into a byte vector
+or callback sink.
+
 ## Requirements
 
 - CMake ≥ 3.20
-- C++20 compiler (GCC, Clang, or MSVC)
+- C++17 compiler (GCC, Clang, or MSVC)
 - **zlib** (required)
 - **mbedTLS** (fetched via CMake FetchContent; provides SHA1/SHA256 and X.509/RSA/ECDSA for AVB)
 

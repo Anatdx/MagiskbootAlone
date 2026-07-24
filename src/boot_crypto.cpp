@@ -134,7 +134,17 @@ constexpr std::size_t LZ4_LEGACY_COMPRESS_BLOCK = 64 * 1024;
 [[noreturn]] void unsupported_format(const char *op, FileFormat fmt) {
     LOGE("magiskboot: %s for format [%s] is not implemented in standalone C++ port\n",
          op, fmt2name(fmt));
-    std::exit(1);
+    throw std::runtime_error("unsupported compression format");
+}
+
+void emit(
+    const BootByteSink& sink,
+    const void* data,
+    std::size_t size) {
+    if (size != 0 &&
+        !sink(static_cast<const std::uint8_t*>(data), size)) {
+        throw std::runtime_error("compression output rejected");
+    }
 }
 
 std::uint32_t read_le32(const std::uint8_t *p) {
@@ -144,7 +154,7 @@ std::uint32_t read_le32(const std::uint8_t *p) {
            (static_cast<std::uint32_t>(p[3]) << 24);
 }
 
-void lz4f_compress(byte_view in, int out_fd) {
+void lz4f_compress(byte_view in, const BootByteSink& sink) {
     std::size_t bound = LZ4F_compressFrameBound(in.size(), nullptr);
     std::vector<char> buf(bound);
     std::size_t n = LZ4F_compressFrame(buf.data(), bound, in.data(), in.size(), nullptr);
@@ -152,18 +162,17 @@ void lz4f_compress(byte_view in, int out_fd) {
         LOGE("LZ4F_compressFrame failed: %s\n", LZ4F_getErrorName(n));
         throw std::runtime_error("LZ4 frame compress failed");
     }
-    if (xwrite(out_fd, buf.data(), n) < 0) {
-        throw std::runtime_error("write failed");
-    }
+    emit(sink, buf.data(), n);
 }
 
-void lz4f_decompress(byte_view in, int out_fd) {
+void lz4f_decompress(byte_view in, const BootByteSink& sink) {
     LZ4F_dctx *dctx = nullptr;
     if (LZ4F_createDecompressionContext(&dctx, LZ4F_VERSION) != 0) {
         throw std::runtime_error("LZ4 frame init failed");
     }
     std::array<char, 64 * 1024> out_buf{};
     std::size_t src_pos = 0;
+    std::size_t remaining_hint = 1;
     while (src_pos < in.size()) {
         std::size_t src_len = in.size() - src_pos;
         std::size_t dst_len = out_buf.size();
@@ -174,19 +183,33 @@ void lz4f_decompress(byte_view in, int out_fd) {
             throw std::runtime_error("LZ4 frame decompress failed");
         }
         src_pos += src_len;
-        if (dst_len > 0 && xwrite(out_fd, out_buf.data(), dst_len) < 0) {
-            LZ4F_freeDecompressionContext(dctx);
-            throw std::runtime_error("write failed");
+        if (dst_len > 0) {
+            try {
+                emit(sink, out_buf.data(), dst_len);
+            } catch (...) {
+                LZ4F_freeDecompressionContext(dctx);
+                throw;
+            }
         }
         if (n == 0) {
+            remaining_hint = 0;
             break;
+        }
+        remaining_hint = n;
+        if (src_len == 0 && dst_len == 0) {
+            LZ4F_freeDecompressionContext(dctx);
+            throw std::runtime_error(
+                "LZ4 frame decompressor made no progress");
         }
     }
     LZ4F_freeDecompressionContext(dctx);
+    if (remaining_hint != 0 || src_pos != in.size()) {
+        throw std::runtime_error("truncated LZ4 frame");
+    }
 }
 
-void lz4_legacy_compress(byte_view in, int out_fd) {
-    xwrite(out_fd, LZ4_LEGACY_MAGIC, LZ4_LEGACY_MAGIC_SIZE);
+void lz4_legacy_compress(byte_view in, const BootByteSink& sink) {
+    emit(sink, LZ4_LEGACY_MAGIC, LZ4_LEGACY_MAGIC_SIZE);
     std::vector<char> c_buf(static_cast<std::size_t>(
         LZ4_compressBound(static_cast<int>(LZ4_LEGACY_COMPRESS_BLOCK))));
     const char *src = reinterpret_cast<const char *>(in.data());
@@ -198,8 +221,8 @@ void lz4_legacy_compress(byte_view in, int out_fd) {
             throw std::runtime_error("LZ4 legacy compress failed");
         }
         std::uint32_t le = static_cast<std::uint32_t>(c_sz);
-        xwrite(out_fd, &le, 4);
-        xwrite(out_fd, c_buf.data(), c_sz);
+        emit(sink, &le, sizeof(le));
+        emit(sink, c_buf.data(), static_cast<std::size_t>(c_sz));
         src += chunk;
         remaining -= static_cast<std::size_t>(chunk);
     }
@@ -211,7 +234,7 @@ constexpr std::size_t LZ4_LEGACY_COMP_BLOCK_MAX = 16 * 1024 * 1024;  // 16MB max
 // Cap total decompressed size to avoid corrupt/malicious stream filling disk (e.g. many small blocks).
 constexpr std::size_t LZ4_LEGACY_DECOMP_TOTAL_MAX = 256 * 1024 * 1024;  // 256MB
 
-void lz4_legacy_decompress(byte_view in, int out_fd) {
+void lz4_legacy_decompress(byte_view in, const BootByteSink& sink) {
     if (in.size() <= LZ4_LEGACY_MAGIC_SIZE + 4) {
         LOGE("magiskboot: LZ4 legacy stream too short\n");
         throw std::runtime_error("LZ4 legacy too short");
@@ -252,12 +275,18 @@ void lz4_legacy_decompress(byte_view in, int out_fd) {
             throw std::runtime_error("LZ4 legacy decompress output too large");
         }
         total_out += n_u;
-        xwrite(out_fd, out_buf.data(), n_u);
+        emit(sink, out_buf.data(), n_u);
         off += comp_sz;
+    }
+    if (off != in.size()) {
+        throw std::runtime_error("truncated LZ4 legacy stream");
     }
 }
 
-void zlib_deflate_gzip(byte_view in, int out_fd, int level) {
+void zlib_deflate_gzip(
+    byte_view in,
+    const BootByteSink& sink,
+    int level) {
     z_stream strm{};
     if (deflateInit2(&strm, level, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
         LOGE("deflateInit2 failed\n");
@@ -277,15 +306,19 @@ void zlib_deflate_gzip(byte_view in, int out_fd, int level) {
             throw std::runtime_error("deflate stream error");
         }
         std::size_t have = out_buf.size() - strm.avail_out;
-        if (have > 0 && xwrite(out_fd, out_buf.data(), have) < 0) {
-            deflateEnd(&strm);
-            throw std::runtime_error("write failed");
+        if (have > 0) {
+            try {
+                emit(sink, out_buf.data(), have);
+            } catch (...) {
+                deflateEnd(&strm);
+                throw;
+            }
         }
     } while (ret != Z_STREAM_END);
     deflateEnd(&strm);
 }
 
-void zlib_inflate_gzip(byte_view in, int out_fd) {
+void zlib_inflate_gzip(byte_view in, const BootByteSink& sink) {
     z_stream strm{};
     if (inflateInit2(&strm, 15 + 32) != Z_OK) {
         LOGE("inflateInit2 failed\n");
@@ -299,22 +332,26 @@ void zlib_inflate_gzip(byte_view in, int out_fd) {
         strm.next_out = out_buf.data();
         strm.avail_out = static_cast<uInt>(out_buf.size());
         ret = inflate(&strm, Z_NO_FLUSH);
-        if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
+        if (ret != Z_OK && ret != Z_STREAM_END) {
             LOGE("inflate failed (%d)\n", ret);
             inflateEnd(&strm);
             throw std::runtime_error("inflate failed");
         }
         std::size_t have = out_buf.size() - strm.avail_out;
-        if (have > 0 && xwrite(out_fd, out_buf.data(), have) < 0) {
-            inflateEnd(&strm);
-            throw std::runtime_error("write failed");
+        if (have > 0) {
+            try {
+                emit(sink, out_buf.data(), have);
+            } catch (...) {
+                inflateEnd(&strm);
+                throw;
+            }
         }
     } while (ret != Z_STREAM_END);
     inflateEnd(&strm);
 }
 
 #ifdef USE_LIBLZMA
-void xz_compress(byte_view in, int out_fd) {
+void xz_compress(byte_view in, const BootByteSink& sink) {
     lzma_stream stream = LZMA_STREAM_INIT;
     lzma_ret ret = lzma_easy_encoder(&stream, LZMA_PRESET_DEFAULT, LZMA_CHECK_CRC64);
     if (ret != LZMA_OK) {
@@ -336,9 +373,13 @@ void xz_compress(byte_view in, int out_fd) {
             throw std::runtime_error("xz compress failed");
         }
         const std::size_t produced = out_buf.size() - stream.avail_out;
-        if (produced > 0 && xwrite(out_fd, out_buf.data(), produced) < 0) {
-            lzma_end(&stream);
-            throw std::runtime_error("write failed");
+        if (produced > 0) {
+            try {
+                emit(sink, out_buf.data(), produced);
+            } catch (...) {
+                lzma_end(&stream);
+                throw;
+            }
         }
         if (ret == LZMA_STREAM_END) {
             break;
@@ -347,7 +388,7 @@ void xz_compress(byte_view in, int out_fd) {
     lzma_end(&stream);
 }
 
-void xz_decompress(byte_view in, int out_fd) {
+void xz_decompress(byte_view in, const BootByteSink& sink) {
     lzma_stream stream = LZMA_STREAM_INIT;
     lzma_ret ret = lzma_stream_decoder(&stream, UINT64_MAX, 0);
     if (ret != LZMA_OK) {
@@ -365,9 +406,13 @@ void xz_decompress(byte_view in, int out_fd) {
             throw std::runtime_error("xz decompress failed");
         }
         const std::size_t produced = out_buf.size() - stream.avail_out;
-        if (produced > 0 && xwrite(out_fd, out_buf.data(), produced) < 0) {
-            lzma_end(&stream);
-            throw std::runtime_error("write failed");
+        if (produced > 0) {
+            try {
+                emit(sink, out_buf.data(), produced);
+            } catch (...) {
+                lzma_end(&stream);
+                throw;
+            }
         }
         if (ret == LZMA_STREAM_END) {
             break;
@@ -377,26 +422,27 @@ void xz_decompress(byte_view in, int out_fd) {
 }
 #endif
 
-} // namespace
-
-void compress_bytes(FileFormat format, byte_view in_bytes, int out_fd) {
+void compress_to_sink(
+    FileFormat format,
+    byte_view in_bytes,
+    const BootByteSink& sink) {
     switch (format) {
         case FileFormat::GZIP:
         case FileFormat::ZOPFLI:
-            zlib_deflate_gzip(in_bytes, out_fd,
+            zlib_deflate_gzip(in_bytes, sink,
                               format == FileFormat::ZOPFLI ? Z_BEST_COMPRESSION
                                                            : Z_DEFAULT_COMPRESSION);
             break;
         case FileFormat::LZ4:
-            lz4f_compress(in_bytes, out_fd);
+            lz4f_compress(in_bytes, sink);
             break;
         case FileFormat::LZ4_LEGACY:
         case FileFormat::LZ4_LG:
-            lz4_legacy_compress(in_bytes, out_fd);
+            lz4_legacy_compress(in_bytes, sink);
             break;
         case FileFormat::XZ:
 #ifdef USE_LIBLZMA
-            xz_compress(in_bytes, out_fd);
+            xz_compress(in_bytes, sink);
             break;
 #else
             unsupported_format("compress", format);
@@ -406,28 +452,135 @@ void compress_bytes(FileFormat format, byte_view in_bytes, int out_fd) {
     }
 }
 
-void decompress_bytes(FileFormat format, byte_view in_bytes, int out_fd) {
+void decompress_to_sink(
+    FileFormat format,
+    byte_view in_bytes,
+    const BootByteSink& sink) {
     switch (format) {
         case FileFormat::GZIP:
         case FileFormat::ZOPFLI:
-            zlib_inflate_gzip(in_bytes, out_fd);
+            zlib_inflate_gzip(in_bytes, sink);
             break;
         case FileFormat::LZ4:
-            lz4f_decompress(in_bytes, out_fd);
+            lz4f_decompress(in_bytes, sink);
             break;
         case FileFormat::LZ4_LEGACY:
         case FileFormat::LZ4_LG:
-            lz4_legacy_decompress(in_bytes, out_fd);
+            lz4_legacy_decompress(in_bytes, sink);
             break;
         case FileFormat::XZ:
 #ifdef USE_LIBLZMA
-            xz_decompress(in_bytes, out_fd);
+            xz_decompress(in_bytes, sink);
             break;
 #else
             unsupported_format("decompress", format);
 #endif
         default:
             unsupported_format("decompress", format);
+    }
+}
+
+bool transform_to_vector(
+    FileFormat format,
+    byte_view input,
+    std::vector<std::uint8_t>& output,
+    std::size_t max_output_size,
+    bool compress) {
+    std::vector<std::uint8_t> replacement;
+    const BootByteSink sink =
+        [&](const std::uint8_t* data, std::size_t size) {
+            if (replacement.size() > max_output_size ||
+                size > max_output_size - replacement.size()) {
+                return false;
+            }
+            replacement.insert(replacement.end(), data, data + size);
+            return true;
+        };
+    const bool success = compress
+                             ? compress_bytes(format, input, sink)
+                             : decompress_bytes(format, input, sink);
+    if (!success) {
+        return false;
+    }
+    output = std::move(replacement);
+    return true;
+}
+
+} // namespace
+
+bool compress_bytes(
+    FileFormat format,
+    byte_view in_bytes,
+    const BootByteSink& sink) {
+    if (!sink) {
+        return false;
+    }
+    try {
+        compress_to_sink(format, in_bytes, sink);
+        return true;
+    } catch (const std::exception& error) {
+        LOGE("magiskboot: compression failed: %s\n", error.what());
+        return false;
+    }
+}
+
+bool decompress_bytes(
+    FileFormat format,
+    byte_view in_bytes,
+    const BootByteSink& sink) {
+    if (!sink) {
+        return false;
+    }
+    try {
+        decompress_to_sink(format, in_bytes, sink);
+        return true;
+    } catch (const std::exception& error) {
+        LOGE("magiskboot: decompression failed: %s\n", error.what());
+        return false;
+    }
+}
+
+bool compress_bytes(
+    FileFormat format,
+    byte_view in_bytes,
+    std::vector<std::uint8_t>& output,
+    std::size_t max_output_size) {
+    return transform_to_vector(
+        format, in_bytes, output, max_output_size, true);
+}
+
+bool decompress_bytes(
+    FileFormat format,
+    byte_view in_bytes,
+    std::vector<std::uint8_t>& output,
+    std::size_t max_output_size) {
+    return transform_to_vector(
+        format, in_bytes, output, max_output_size, false);
+}
+
+void compress_bytes(FileFormat format, byte_view in_bytes, int out_fd) {
+    if (out_fd < 0 ||
+        !compress_bytes(
+            format,
+            in_bytes,
+            [out_fd](const std::uint8_t* data, std::size_t size) {
+                return xwrite(out_fd, data, size) ==
+                       static_cast<ssize_t>(size);
+            })) {
+        throw std::runtime_error("compression failed");
+    }
+}
+
+void decompress_bytes(FileFormat format, byte_view in_bytes, int out_fd) {
+    if (out_fd < 0 ||
+        !decompress_bytes(
+            format,
+            in_bytes,
+            [out_fd](const std::uint8_t* data, std::size_t size) {
+                return xwrite(out_fd, data, size) ==
+                       static_cast<ssize_t>(size);
+            })) {
+        throw std::runtime_error("decompression failed");
     }
 }
 
