@@ -320,7 +320,7 @@ static int find_dtb_offset(const uint8_t* buf, unsigned sz) {
     return -1;
 }
 
-static FileFormat check_fmt_lg(const uint8_t* buf, unsigned sz) {
+FileFormat check_fmt_lg(const uint8_t* buf, unsigned sz) {
     FileFormat fmt = check_fmt(buf, sz);
     if (fmt == FileFormat::LZ4_LEGACY) {
         uint32_t off = 4;

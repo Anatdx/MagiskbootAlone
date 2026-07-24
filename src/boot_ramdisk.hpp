@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -11,6 +12,16 @@
 
 inline constexpr std::size_t kBootImageDefaultMaxSize = 256U * 1024U * 1024U;
 
+struct BootRamdiskFragmentInfo {
+    std::size_t index = 0;
+    std::string name;
+    std::uint32_t vendor_type = 0;
+    std::array<std::uint32_t, 16> board_id{};
+    std::uint64_t packed_size = 0;
+    FileFormat compression = FileFormat::UNKNOWN;
+    bool is_vendor = false;
+};
+
 struct BootRamdiskInfo {
     std::uint32_t header_version = 0;
     std::uint64_t source_image_size = 0;
@@ -18,10 +29,13 @@ struct BootRamdiskInfo {
     FileFormat compression = FileFormat::UNKNOWN;
     bool has_kernel = false;
     bool has_avb_footer = false;
+    bool is_vendor = false;
+    std::size_t ramdisk_count = 0;
 };
 
-// A no-shards boot/init_boot editor. The source image remains mapped while its
-// ramdisk is represented by one persistent in-memory CPIO document.
+// A no-shards boot/init_boot/vendor_boot editor. The source image remains
+// mapped while each independently compressed ramdisk fragment is represented
+// by one persistent in-memory CPIO document.
 class BootRamdiskDocument {
 public:
     BootRamdiskDocument();
@@ -36,8 +50,12 @@ public:
     [[nodiscard]] bool load(const std::string& image_path);
     [[nodiscard]] bool loaded() const noexcept;
 
+    [[nodiscard]] std::size_t ramdisk_count() const noexcept;
     CpioDocument& ramdisk();
     const CpioDocument& ramdisk() const;
+    CpioDocument& ramdisk(std::size_t index);
+    const CpioDocument& ramdisk(std::size_t index) const;
+    [[nodiscard]] const BootRamdiskFragmentInfo& ramdisk_info(std::size_t index) const;
     [[nodiscard]] const BootRamdiskInfo& info() const;
     [[nodiscard]] const std::string& last_error() const noexcept;
 

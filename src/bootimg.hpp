@@ -450,6 +450,8 @@ enum {
     BOOT_FLAGS_MAX
 };
 
+FileFormat check_fmt_lg(const uint8_t* buf, unsigned size);
+
 struct boot_img {
     struct vendor_ramdisk_table_view {
         const vendor_ramdisk_table_entry_v4 *ptr = nullptr;

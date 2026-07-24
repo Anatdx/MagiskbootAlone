@@ -445,13 +445,140 @@ bool boot_ramdisk_document_test() {
     return true;
 }
 
+bool vendor_boot_ramdisk_document_test() {
+    constexpr std::size_t kPageSize = 4096;
+    const auto platform_cpio = make_archive();
+    CpioDocument dlkm_document;
+    CHECK(dlkm_document.load(platform_cpio.data(), platform_cpio.size()));
+    const auto dlkm_tool = dlkm_document.find("system/bin/tool");
+    CHECK(dlkm_tool);
+    CHECK(dlkm_document.replace_content(*dlkm_tool, source_from("dlkm-source")));
+    std::vector<std::uint8_t> dlkm_cpio;
+    CHECK(dlkm_document.dump(dlkm_cpio));
+
+    std::vector<std::uint8_t> packed_platform;
+    std::vector<std::uint8_t> packed_dlkm;
+    CHECK(compress_bytes(FileFormat::LZ4_LEGACY,
+                         byte_view(platform_cpio.data(), platform_cpio.size()), packed_platform,
+                         kCpioDefaultMaxContentSize));
+    CHECK(compress_bytes(FileFormat::LZ4_LEGACY,
+                         byte_view(dlkm_cpio.data(), dlkm_cpio.size()), packed_dlkm,
+                         kCpioDefaultMaxContentSize));
+
+    std::array<vendor_ramdisk_table_entry_v4, 2> table{};
+    table[0].ramdisk_size = static_cast<std::uint32_t>(packed_platform.size());
+    table[0].ramdisk_offset = 0;
+    table[0].ramdisk_type = VENDOR_RAMDISK_TYPE_PLATFORM;
+    std::memcpy(table[0].ramdisk_name.data(), "platform", 8);
+    table[0].board_id[0] = 0x10203040U;
+    table[1].ramdisk_size = static_cast<std::uint32_t>(packed_dlkm.size());
+    table[1].ramdisk_offset = table[0].ramdisk_size;
+    table[1].ramdisk_type = VENDOR_RAMDISK_TYPE_DLKM;
+    std::memcpy(table[1].ramdisk_name.data(), "dlkm", 4);
+    table[1].board_id[15] = 0x55667788U;
+
+    const std::array<std::uint8_t, 7> dtb = {0xd0, 0x0d, 0xfe, 0xed, 1, 2, 3};
+    const std::array<std::uint8_t, 11> bootconfig = {
+        'a', 'n', 'd', 'r', 'o', 'i', 'd', '=', '1', '\n', '\0'};
+    boot_img_hdr_vnd_v4 header{};
+    std::memcpy(header.magic.data(), VENDOR_BOOT_MAGIC, BOOT_MAGIC_SIZE);
+    header.header_version = 4;
+    header.page_size = kPageSize;
+    header.ramdisk_size =
+        static_cast<std::uint32_t>(packed_platform.size() + packed_dlkm.size());
+    header.header_size = sizeof(header);
+    header.dtb_size = dtb.size();
+    header.vendor_ramdisk_table_size = sizeof(table);
+    header.vendor_ramdisk_table_entry_num = table.size();
+    header.vendor_ramdisk_table_entry_size = sizeof(table[0]);
+    header.bootconfig_size = bootconfig.size();
+
+    std::vector<std::uint8_t> source(kPageSize, 0);
+    std::memcpy(source.data(), &header, sizeof(header));
+    source.insert(source.end(), packed_platform.begin(), packed_platform.end());
+    source.insert(source.end(), packed_dlkm.begin(), packed_dlkm.end());
+    pad_to(source, kPageSize);
+    source.insert(source.end(), dtb.begin(), dtb.end());
+    pad_to(source, kPageSize);
+    const auto* table_bytes = reinterpret_cast<const std::uint8_t*>(table.data());
+    source.insert(source.end(), table_bytes, table_bytes + sizeof(table));
+    pad_to(source, kPageSize);
+    source.insert(source.end(), bootconfig.begin(), bootconfig.end());
+    pad_to(source, kPageSize);
+
+    std::array<char, 64> source_path{};
+    std::array<char, 64> output_path{};
+    std::snprintf(source_path.data(), source_path.size(), "/tmp/vendor-boot-source-XXXXXX");
+    std::snprintf(output_path.data(), output_path.size(), "/tmp/vendor-boot-output-XXXXXX");
+    const int source_fd = ::mkstemp(source_path.data());
+    const int output_fd = ::mkstemp(output_path.data());
+    CHECK(source_fd >= 0);
+    CHECK(output_fd >= 0);
+    ::close(source_fd);
+    ::close(output_fd);
+    CHECK(write_file(source_path.data(), source));
+
+    BootRamdiskDocument document;
+    CHECK(document.load(source_path.data()));
+    CHECK(document.info().is_vendor);
+    CHECK(document.info().header_version == 4);
+    CHECK(document.info().ramdisk_count == 2);
+    CHECK(document.ramdisk_count() == 2);
+    CHECK(document.ramdisk_info(0).name == "platform");
+    CHECK(document.ramdisk_info(0).vendor_type == VENDOR_RAMDISK_TYPE_PLATFORM);
+    CHECK(document.ramdisk_info(0).board_id[0] == 0x10203040U);
+    CHECK(document.ramdisk_info(1).name == "dlkm");
+    CHECK(document.ramdisk_info(1).vendor_type == VENDOR_RAMDISK_TYPE_DLKM);
+    CHECK(document.ramdisk_info(1).board_id[15] == 0x55667788U);
+    CHECK(document.ramdisk_info(0).compression == FileFormat::LZ4_LEGACY);
+    CHECK(document.ramdisk_info(1).compression == FileFormat::LZ4_LEGACY);
+
+    const auto platform_tool = document.ramdisk(0).find("system/bin/tool");
+    const auto rebuilt_dlkm_tool = document.ramdisk(1).find("system/bin/tool");
+    CHECK(platform_tool);
+    CHECK(rebuilt_dlkm_tool);
+    CHECK(document.ramdisk(0).replace_content(*platform_tool, source_from("platform-edit")));
+    CHECK(document.ramdisk(1).replace_content(*rebuilt_dlkm_tool, source_from("dlkm-edit")));
+    CHECK(document.dump(output_path.data()));
+
+    BootRamdiskDocument reloaded;
+    CHECK(reloaded.load(output_path.data()));
+    CHECK(reloaded.ramdisk_count() == 2);
+    bool read_ok = false;
+    const auto reloaded_platform_tool = reloaded.ramdisk(0).find("system/bin/tool");
+    const auto reloaded_dlkm_tool = reloaded.ramdisk(1).find("system/bin/tool");
+    CHECK(reloaded_platform_tool);
+    CHECK(reloaded_dlkm_tool);
+    CHECK(read_all(reloaded.ramdisk(0), *reloaded_platform_tool, read_ok) == "platform-edit");
+    CHECK(read_ok);
+    CHECK(read_all(reloaded.ramdisk(1), *reloaded_dlkm_tool, read_ok) == "dlkm-edit");
+    CHECK(read_ok);
+
+    const boot_img rebuilt_image(output_path.data());
+    const auto rebuilt_table = rebuilt_image.vendor_ramdisk_tbl();
+    CHECK(rebuilt_table.size() == 2);
+    CHECK(rebuilt_table.begin()[0].ramdisk_offset == 0);
+    CHECK(rebuilt_table.begin()[1].ramdisk_offset == rebuilt_table.begin()[0].ramdisk_size);
+    CHECK(rebuilt_table.begin()[0].ramdisk_type == VENDOR_RAMDISK_TYPE_PLATFORM);
+    CHECK(rebuilt_table.begin()[1].ramdisk_type == VENDOR_RAMDISK_TYPE_DLKM);
+    CHECK(rebuilt_table.begin()[0].board_id[0] == 0x10203040U);
+    CHECK(rebuilt_table.begin()[1].board_id[15] == 0x55667788U);
+    CHECK(std::memcmp(rebuilt_image.dtb, dtb.data(), dtb.size()) == 0);
+    CHECK(std::memcmp(rebuilt_image.bootconfig, bootconfig.data(), bootconfig.size()) == 0);
+
+    ::unlink(source_path.data());
+    ::unlink(output_path.data());
+    return true;
+}
+
 }  // namespace
 
 int main() {
     return document_round_trip_test() &&
                    recursive_remove_updates_hard_links_test() &&
                    compression_memory_stream_test() &&
-                   boot_ramdisk_document_test()
+                   boot_ramdisk_document_test() &&
+                   vendor_boot_ramdisk_document_test()
                ? 0
                : 1;
 }
