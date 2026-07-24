@@ -120,6 +120,24 @@ std::string read_all(const CpioArchive& archive, CpioNodeId id, bool& success) {
     return result;
 }
 
+std::string read_range(
+    const CpioArchive& archive,
+    CpioNodeId id,
+    std::uint64_t offset,
+    std::uint64_t length,
+    bool& success) {
+    std::string result;
+    success = archive.read_content(
+        id,
+        offset,
+        length,
+        [&](const std::uint8_t* data, std::size_t size) {
+            result.append(reinterpret_cast<const char*>(data), size);
+            return true;
+        });
+    return result;
+}
+
 bool document_round_trip_test() {
     const auto bytes = make_archive();
     CpioDocument document;
@@ -159,6 +177,12 @@ bool document_round_trip_test() {
     bool read_ok = false;
     CHECK(read_all(document, *tool2_id, read_ok) == "payload");
     CHECK(read_ok);
+    CHECK(read_range(document, *tool2_id, 1, 4, read_ok) == "aylo");
+    CHECK(read_ok);
+    CHECK(read_range(document, *tool2_id, 7, 10, read_ok).empty());
+    CHECK(read_ok);
+    CHECK(read_range(document, *tool2_id, 8, 1, read_ok).empty());
+    CHECK(!read_ok);
     CHECK(document.replace_content(*tool2_id, source_from("replacement")));
     CHECK(read_all(document, *tool_id, read_ok) == "replacement");
     CHECK(read_ok);

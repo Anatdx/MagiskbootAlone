@@ -77,6 +77,11 @@ public:
     [[nodiscard]] std::optional<CpioNodeInfo> stat(CpioNodeId id) const;
     [[nodiscard]] std::vector<CpioNodeInfo> list(CpioNodeId directory_id) const;
     [[nodiscard]] bool read_content(CpioNodeId id, const CpioDataSink& sink) const;
+    [[nodiscard]] bool read_content(
+        CpioNodeId id,
+        std::uint64_t offset,
+        std::uint64_t length,
+        const CpioDataSink& sink) const;
     bool replace_content(CpioNodeId id, const CpioDataSource& source,
                          std::size_t max_bytes = kCpioDefaultMaxContentSize);
     bool update_metadata(CpioNodeId id, const CpioMetadataPatch& patch);

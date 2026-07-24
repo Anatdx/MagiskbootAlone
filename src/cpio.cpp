@@ -805,16 +805,35 @@ std::vector<CpioNodeInfo> CpioArchive::list(CpioNodeId directory_id) const {
 }
 
 bool CpioArchive::read_content(CpioNodeId id, const CpioDataSink& sink) const {
+    return read_content(
+        id,
+        0,
+        std::numeric_limits<std::uint64_t>::max(),
+        sink);
+}
+
+bool CpioArchive::read_content(
+    CpioNodeId id,
+    std::uint64_t requested_offset,
+    std::uint64_t requested_length,
+    const CpioDataSink& sink) const {
     const CpioEntry* entry = entry_by_id(id);
     if (entry == nullptr || !sink) {
         return false;
     }
     const auto& data = content_entry(*entry)->data;
+    if (requested_offset > data.size()) {
+        return false;
+    }
+    const std::size_t begin = static_cast<std::size_t>(requested_offset);
+    const std::uint64_t available = data.size() - begin;
+    const std::size_t length = static_cast<std::size_t>(
+        std::min(requested_length, available));
     constexpr std::size_t kChunkSize = 64U * 1024U;
     std::size_t offset = 0;
-    while (offset < data.size()) {
-        const std::size_t count = std::min(kChunkSize, data.size() - offset);
-        if (!sink(data.data() + offset, count)) {
+    while (offset < length) {
+        const std::size_t count = std::min(kChunkSize, length - offset);
+        if (!sink(data.data() + begin + offset, count)) {
             return false;
         }
         offset += count;
