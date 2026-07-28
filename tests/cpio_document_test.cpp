@@ -172,6 +172,24 @@ std::string read_range(
     return result;
 }
 
+std::string read_range_by_path(
+    const CpioArchive& archive,
+    std::string_view path,
+    std::uint64_t offset,
+    std::uint64_t length,
+    bool& success) {
+    std::string result;
+    success = archive.read_content(
+        path,
+        offset,
+        length,
+        [&](const std::uint8_t* data, std::size_t size) {
+            result.append(reinterpret_cast<const char*>(data), size);
+            return true;
+        });
+    return result;
+}
+
 bool document_round_trip_test() {
     const auto bytes = make_archive();
     CpioDocument document;
@@ -217,8 +235,17 @@ bool document_round_trip_test() {
     CHECK(read_ok);
     CHECK(read_range(document, *tool2_id, 8, 1, read_ok).empty());
     CHECK(!read_ok);
+    CHECK(read_range_by_path(document, "system/bin/tool2", 1, 4, read_ok) == "aylo");
+    CHECK(read_ok);
+    CHECK(read_range_by_path(document, "../system/bin/tool", 0, 1, read_ok).empty());
+    CHECK(!read_ok);
+    const std::string embedded_nul_path{"system/bin/tool\0ignored", 23};
+    CHECK(read_range_by_path(document, embedded_nul_path, 0, 1, read_ok).empty());
+    CHECK(!read_ok);
     CHECK(document.replace_content(*tool2_id, source_from("replacement")));
     CHECK(read_all(document, *tool_id, read_ok) == "replacement");
+    CHECK(read_ok);
+    CHECK(read_range_by_path(document, "system/bin/tool2", 0, 64, read_ok) == "replacement");
     CHECK(read_ok);
 
     CHECK(document.move(*bin_id, kCpioRootNodeId, "sbin"));

@@ -86,6 +86,11 @@ public:
         std::uint64_t offset,
         std::uint64_t length,
         const CpioDataSink& sink) const;
+    [[nodiscard]] bool read_content(
+        std::string_view path,
+        std::uint64_t offset,
+        std::uint64_t length,
+        const CpioDataSink& sink) const;
     bool replace_content(CpioNodeId id, const CpioDataSource& source,
                          std::size_t max_bytes = kCpioDefaultMaxContentSize);
     bool update_metadata(CpioNodeId id, const CpioMetadataPatch& patch);
@@ -127,6 +132,11 @@ private:
     [[nodiscard]] const CpioEntry* entry_by_id(CpioNodeId id) const;
     [[nodiscard]] const CpioEntry* content_entry(const CpioEntry& entry) const;
     [[nodiscard]] CpioEntry* content_entry(CpioEntry& entry);
+    [[nodiscard]] bool read_entry_content(
+        const CpioEntry& entry,
+        std::uint64_t offset,
+        std::uint64_t length,
+        const CpioDataSink& sink) const;
     [[nodiscard]] std::optional<std::string> path_by_id(CpioNodeId id) const;
     [[nodiscard]] std::optional<std::string> child_path(CpioNodeId parent_id,
                                                         std::string_view name) const;

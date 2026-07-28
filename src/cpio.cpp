@@ -856,7 +856,30 @@ bool CpioArchive::read_content(
     if (entry == nullptr || !sink) {
         return false;
     }
-    const auto& data = content_entry(*entry)->data;
+    return read_entry_content(*entry, requested_offset, requested_length, sink);
+}
+
+bool CpioArchive::read_content(
+    std::string_view path,
+    std::uint64_t requested_offset,
+    std::uint64_t requested_length,
+    const CpioDataSink& sink) const {
+    if (!sink || has_unsafe_path_segment(path)) {
+        return false;
+    }
+    const auto it = entries_.find(normalize_path(std::string(path)));
+    if (it == entries_.end()) {
+        return false;
+    }
+    return read_entry_content(it->second, requested_offset, requested_length, sink);
+}
+
+bool CpioArchive::read_entry_content(
+    const CpioEntry& entry,
+    std::uint64_t requested_offset,
+    std::uint64_t requested_length,
+    const CpioDataSink& sink) const {
+    const auto& data = content_entry(entry)->data;
     if (requested_offset > data.size()) {
         return false;
     }
