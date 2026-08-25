@@ -487,18 +487,18 @@ bool transform_to_vector(
     std::size_t max_output_size,
     bool compress) {
     std::vector<std::uint8_t> replacement;
-    const BootByteSink sink =
-        [&](const std::uint8_t* data, std::size_t size) {
-            if (replacement.size() > max_output_size ||
-                size > max_output_size - replacement.size()) {
-                return false;
-            }
-            replacement.insert(replacement.end(), data, data + size);
-            return true;
-        };
-    const bool success = compress
-                             ? compress_bytes(format, input, sink)
-                             : decompress_bytes(format, input, sink);
+    // Named, so the FunctionRef the callee receives refers to an object that
+    // outlives the call. Binding a temporary lambda to a BootByteSink variable
+    // would leave the reference dangling the moment the initializer ended.
+    auto append = [&](const std::uint8_t* data, std::size_t size) {
+        if (replacement.size() > max_output_size || size > max_output_size - replacement.size()) {
+            return false;
+        }
+        replacement.insert(replacement.end(), data, data + size);
+        return true;
+    };
+    const bool success =
+        compress ? compress_bytes(format, input, append) : decompress_bytes(format, input, append);
     if (!success) {
         return false;
     }

@@ -3,12 +3,13 @@
 #include <sys/types.h>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <map>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "function_ref.hpp"
 
 using CpioNodeId = std::uint64_t;
 
@@ -62,8 +63,8 @@ struct CpioMetadataPatch {
     std::optional<std::uint32_t> mtime;
 };
 
-using CpioDataSink = std::function<bool(const std::uint8_t*, std::size_t)>;
-using CpioDataSource = std::function<ssize_t(std::uint8_t*, std::size_t)>;
+using CpioDataSink = FunctionRef<bool(const std::uint8_t*, std::size_t)>;
+using CpioDataSource = FunctionRef<ssize_t(std::uint8_t*, std::size_t)>;
 
 class CpioArchive {
 public:

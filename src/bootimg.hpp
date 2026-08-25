@@ -339,7 +339,7 @@ struct dyn_img_v1 : public dyn_img_v0 {
     uint32_t extra_size() const override { return 0; }
 };
 
-struct dyn_img_v2 : public dyn_img_v1 {
+struct dyn_img_v2 final : public dyn_img_v1 {
     impl_cls(v2)
     impl_var(dtb_size)
 };
@@ -351,7 +351,7 @@ struct dyn_img_v2 : public dyn_img_v1 {
 #define impl_var(name) __impl_var(name, hdr_pxa)
 #define impl_str(name) __impl_str(name, hdr_pxa)
 
-struct dyn_img_pxa : public dyn_img_common {
+struct dyn_img_pxa final : public dyn_img_common {
     impl_cls(pxa)
     impl_var(extra_size)
     impl_val(page_size)
@@ -381,7 +381,7 @@ struct dyn_img_v3 : public dyn_img_hdr_boot {
     const char *extra_cmdline() const override { return &v4_hdr->cmdline[BOOT_ARGS_SIZE]; }
 };
 
-struct dyn_img_v4 : public dyn_img_v3 {
+struct dyn_img_v4 final : public dyn_img_v3 {
     impl_cls(v4)
     impl_val(signature_size)
 };
@@ -411,7 +411,7 @@ struct dyn_img_vnd_v3 : public dyn_img_hdr_vendor {
     const char *extra_cmdline() const override { return &v4_vnd->cmdline[BOOT_ARGS_SIZE]; }
 };
 
-struct dyn_img_vnd_v4 : public dyn_img_vnd_v3 {
+struct dyn_img_vnd_v4 final : public dyn_img_vnd_v3 {
     impl_cls(vnd_v4)
     impl_val(vendor_ramdisk_table_size)
     impl_val(vendor_ramdisk_table_entry_num)

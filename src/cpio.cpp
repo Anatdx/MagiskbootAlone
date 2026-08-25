@@ -1,20 +1,18 @@
 #include "cpio.hpp"
 
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
-#include <functional>
 #include <limits>
 #include <map>
 #include <set>
-#include <sstream>
 #include <string>
 #include <string_view>
-#include <sys/stat.h>
 #include <tuple>
 #include <utility>
 #if defined(__linux__) || defined(__ANDROID__)
@@ -133,19 +131,24 @@ bool write_entry(
     return true;
 }
 
-std::vector<std::string> split_ws(const std::string& s) {
-    std::istringstream iss(s);
+std::vector<std::string> split_ws(const std::string& text) {
+    constexpr std::string_view kWhitespace = " \t\r\n\f\v";
     std::vector<std::string> out;
-    std::string token;
-    while (iss >> token) {
-        out.push_back(token);
+    for (std::size_t begin = 0; begin < text.size();) {
+        begin = text.find_first_not_of(kWhitespace, begin);
+        if (begin == std::string::npos)
+            break;
+        std::size_t end = text.find_first_of(kWhitespace, begin);
+        if (end == std::string::npos)
+            end = text.size();
+        out.emplace_back(text, begin, end - begin);
+        begin = end;
     }
     return out;
 }
 
-std::size_t remove_patterns_from_buf(
-    std::vector<std::uint8_t>& buf,
-    const std::function<std::size_t(const std::uint8_t*, std::size_t)>& matcher) {
+template <typename Matcher>
+std::size_t remove_patterns_from_buf(std::vector<std::uint8_t>& buf, const Matcher& matcher) {
     std::size_t write = 0;
     std::size_t read = 0;
     const std::size_t len = buf.size();
@@ -1390,12 +1393,52 @@ int CpioArchive::test() const {
 }
 
 bool CpioArchive::add(std::uint32_t mode, std::string_view cpio_path, const std::string& src_file) {
-    std::ifstream ifs(src_file, std::ios::binary);
-    if (!ifs) {
+    const int fd = open(src_file.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
         PLOGE("open source file %s", src_file.c_str());
         return false;
     }
-    std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    struct stat status{};
+    if (fstat(fd, &status) != 0 || status.st_size < 0 ||
+        static_cast<std::uintmax_t>(status.st_size) >
+            static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max())) {
+        close(fd);
+        return false;
+    }
+
+    // st_size is a sizing hint, not the read length. Every caller in the boot
+    // patch feeds this a regular file, but magiskboot is also reachable as a
+    // multi-call applet, and procfs/sysfs/fifo sources report st_size 0 while
+    // still having content. The ifstream slurp this replaced read those
+    // correctly, so keep reading to EOF and only use the hint to size the buffer.
+    constexpr std::size_t kReadChunk = 64U * 1024U;
+    std::vector<std::uint8_t> data;
+    if (S_ISREG(status.st_mode) && status.st_size > 0) {
+        data.resize(static_cast<std::size_t>(status.st_size));
+    }
+    std::size_t filled = 0;
+    for (;;) {
+        if (filled == data.size()) {
+            data.resize(data.empty() ? kReadChunk : data.size() * 2U);
+        }
+        const ssize_t count = read(fd, data.data() + filled, data.size() - filled);
+        if (count > 0) {
+            filled += static_cast<std::size_t>(count);
+            continue;
+        }
+        if (count == 0) {
+            break;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        close(fd);
+        PLOGE("read source file %s", src_file.c_str());
+        return false;
+    }
+    close(fd);
+    data.resize(filled);
+    data.shrink_to_fit();
 
     const std::string path = normalize_path(std::string(cpio_path));
     if (path.empty()) {

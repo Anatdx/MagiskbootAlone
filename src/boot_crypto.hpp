@@ -1,11 +1,11 @@
 #pragma once
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <vector>
 
 #include "base_host.hpp"
+#include "function_ref.hpp"
 
 // Subset of Magisk's FileFormat enum needed by magiskboot logic.
 enum class FileFormat : std::uint8_t {
@@ -55,8 +55,7 @@ std::unique_ptr<SHA> get_sha(bool use_sha1);
 void sha256_hash(byte_view data, byte_data out);
 
 // Compression helpers (gzip/lz4, and optional xz when built with liblzma).
-using BootByteSink =
-    std::function<bool(const std::uint8_t*, std::size_t)>;
+using BootByteSink = FunctionRef<bool(const std::uint8_t*, std::size_t)>;
 
 void compress_bytes(FileFormat format, byte_view in_bytes, int out_fd);
 void decompress_bytes(FileFormat format, byte_view in_bytes, int out_fd);
